@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { loadDashboard } from './api.js';
+import DeleteTradeConfirm from './components/DeleteTradeConfirm.jsx';
 import StatsPanel from './components/StatsPanel.jsx';
 import TradeForm from './components/TradeForm.jsx';
 import TradesTable from './components/TradesTable.jsx';
@@ -9,15 +10,16 @@ import TradesTable from './components/TradesTable.jsx';
 //   { status: 'error', message }
 //   { status: 'ready', instruments, trades, stats }
 //
-// form is null (no form open), { mode: 'add' } or { mode: 'edit', trade }.
+// form is null (nothing open), { mode: 'add' }, { mode: 'edit', trade } or
+// { mode: 'delete', trade } (the delete confirmation). Only one is open at a time.
 export default function App() {
   const [state, setState] = useState({ status: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
   const [form, setForm] = useState(null);
-  // A short message about the last save: { text, warning }.
+  // A short message about the last save or delete: { text, warning }.
   const [notice, setNotice] = useState(null);
-  // True from a save until the dashboard has been loaded again. Meanwhile the table still
-  // shows the old values, so editing a row could send them back.
+  // True from a save or delete until the dashboard has been loaded again. Meanwhile the
+  // table still shows the old values, so editing a row could send them back.
   const [reloading, setReloading] = useState(false);
 
   useEffect(() => {
@@ -47,8 +49,8 @@ export default function App() {
     setReloadKey((key) => key + 1);
   }
 
-  // After a save, everything is loaded from the server again. The current dashboard stays on
-  // screen until the new data replaces it.
+  // After a save or delete, everything is loaded from the server again. The current
+  // dashboard stays on screen until the new data replaces it.
   function reloadWithNotice(text, warning = false) {
     setForm(null);
     setNotice({ text, warning });
@@ -87,7 +89,20 @@ export default function App() {
 
       {state.status === 'ready' && (
         <>
-          {form ? (
+          {form?.mode === 'delete' ? (
+            <DeleteTradeConfirm
+              key={form.trade.id}
+              trade={form.trade}
+              instruments={state.instruments}
+              onDeleted={() => reloadWithNotice('Trade deleted.')}
+              onTradeMissing={() =>
+                reloadWithNotice(
+                  'That trade had already been deleted. The journal has been reloaded.',
+                )
+              }
+              onCancel={() => setForm(null)}
+            />
+          ) : form ? (
             <TradeForm
               // A new key per trade, so each form starts from its own values.
               key={form.mode === 'edit' ? form.trade.id : 'add'}
@@ -125,7 +140,8 @@ export default function App() {
             trades={state.trades}
             instruments={state.instruments}
             onEdit={(trade) => openForm({ mode: 'edit', trade })}
-            editDisabled={form !== null || reloading}
+            onDelete={(trade) => openForm({ mode: 'delete', trade })}
+            actionsDisabled={form !== null || reloading}
           />
         </>
       )}

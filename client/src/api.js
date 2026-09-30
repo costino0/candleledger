@@ -75,29 +75,43 @@ export async function loadDashboard(signal) {
  * POSTs a new trade. Resolves once the server has created it; the response body isn't
  * used, because the caller reloads the dashboard from the server anyway.
  *
- * Rejects like sendTrade.
+ * Rejects like sendRequest.
  *
  * @param {object} payload  see docs/DATA_MODEL.md#input-validation
  */
 export function createTrade(payload) {
-  return sendTrade('POST', '/api/trades', payload);
+  return sendRequest('POST', '/api/trades', payload);
 }
 
 /**
  * PUTs the full replacement of an existing trade. Resolves once the server has saved it;
  * like createTrade, the response body isn't used.
  *
- * Rejects like sendTrade. A trade that no longer exists is a 404 with `serverError`
+ * Rejects like sendRequest. A trade that no longer exists is a 404 with `serverError`
  * "Trade not found".
  *
  * @param {number} id
  * @param {object} payload  see docs/DATA_MODEL.md#editing-put-apitradesid
  */
 export function updateTrade(id, payload) {
-  return sendTrade('PUT', `/api/trades/${id}`, payload);
+  return sendRequest('PUT', `/api/trades/${id}`, payload);
 }
 
-// Sends a trade payload as JSON.
+/**
+ * DELETEs a trade. Resolves once the server has deleted it. The server answers 204 with no
+ * body, so nothing is read from a successful response.
+ *
+ * Rejects like sendRequest. A trade that is already gone is a 404 with `serverError`
+ * "Trade not found".
+ *
+ * @param {number} id
+ */
+export function deleteTrade(id) {
+  return sendRequest('DELETE', `/api/trades/${id}`);
+}
+
+// Sends a write request. A payload, when given, is sent as JSON; without one the request
+// has no body and no Content-Type. A successful response's body is never read.
 //
 // Rejects with an Error with a readable message, like fetchJson. For an error response the
 // Error also has `status`, the server's `serverError` string when it sent one, and for a
@@ -105,14 +119,16 @@ export function updateTrade(id, payload) {
 //
 // There is no abort signal on purpose: cancelling a write the server may already have saved
 // would only hide the result.
-async function sendTrade(method, path, payload) {
+async function sendRequest(method, path, payload) {
+  const init = { method };
+  if (payload !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(payload);
+  }
+
   let response;
   try {
-    response = await fetch(path, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    response = await fetch(path, init);
   } catch (error) {
     throw new Error('Could not reach the server.', { cause: error });
   }

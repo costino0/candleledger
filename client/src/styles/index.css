@@ -10,6 +10,7 @@
   --error-border: #ff818266;
   --primary: #1f6feb;
   --primary-text: #ffffff;
+  --danger: #cf222e;
 
   font-family:
     system-ui,
@@ -226,6 +227,7 @@ h2 {
 
 .toolbar button,
 .trade-form button,
+.delete-confirm button,
 .trades .actions button {
   padding: 0.375rem 0.875rem;
   border: 1px solid var(--border);
@@ -242,6 +244,21 @@ h2 {
   background: var(--primary);
   color: var(--primary-text);
   font-weight: 600;
+}
+
+/* Destructive actions. The button text says what they do; the color only reinforces it. */
+.trades .actions .button-danger,
+.delete-confirm .button-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.delete-confirm .button-danger {
+  font-weight: 600;
+}
+
+.trades .actions button + button {
+  margin-left: 0.375rem;
 }
 
 button:disabled {
@@ -357,4 +374,21 @@ button:disabled {
 .form-actions {
   display: flex;
   gap: 0.5rem;
+}
+
+/* Delete confirmation */
+
+.delete-confirm {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.delete-confirm > p {
+  margin: 0 0 1rem;
+}
+
+.delete-confirm .message {
+  margin-bottom: 1rem;
 }

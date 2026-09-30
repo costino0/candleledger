@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createTrade, fetchJson, loadDashboard, updateTrade } from './api.js';
+import { createTrade, deleteTrade, fetchJson, loadDashboard, updateTrade } from './api.js';
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -214,5 +214,53 @@ describe('updateTrade', () => {
     });
 
     await expect(updateTrade(7, payload)).rejects.toThrow('Could not reach the server.');
+  });
+});
+
+describe('deleteTrade', () => {
+  it('DELETEs the trade with no body or Content-Type and resolves on 204', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteTrade(7)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/trades/7', { method: 'DELETE' });
+  });
+
+  it('rejects with the status and server error of a missing trade', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Trade not found' }, 404));
+
+    await expect(deleteTrade(7)).rejects.toMatchObject({
+      message: 'Trade not found (HTTP 404)',
+      status: 404,
+      serverError: 'Trade not found',
+    });
+  });
+
+  it("rejects with the server's message for a server error", async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Internal server error' }, 500));
+
+    await expect(deleteTrade(7)).rejects.toMatchObject({
+      message: 'Internal server error (HTTP 500)',
+      status: 500,
+      serverError: 'Internal server error',
+    });
+  });
+
+  it('rejects without a server error for an error response that is not JSON', async () => {
+    vi.stubGlobal('fetch', async () => new Response('Bad Gateway', { status: 502 }));
+
+    const error = await deleteTrade(7).catch((caught) => caught);
+    expect(error.message).toBe('Request failed (HTTP 502)');
+    expect(error.status).toBe(502);
+    expect(error.serverError).toBeUndefined();
+  });
+
+  it('rejects with a readable message when the server cannot be reached', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(deleteTrade(7)).rejects.toThrow('Could not reach the server.');
   });
 });
