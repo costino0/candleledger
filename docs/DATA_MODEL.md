@@ -32,7 +32,7 @@ A tradable futures contract. The server seeds these four rows.
 | `id`                 | Int                | server |                                                   |
 | `instrumentId`       | Int                | client | Must reference an existing Instrument             |
 | `direction`          | `LONG` \| `SHORT`  | client |                                                   |
-| `status`             | `OPEN` \| `CLOSED` | client | Explicit; defaults to `OPEN`                      |
+| `status`             | `OPEN` \| `CLOSED` | client | Explicit; defaults to `OPEN` on create            |
 | `quantity`           | Int                | client | Whole contracts, > 0                              |
 | `entryPrice`         | Decimal(12,2)      | client | Multiple of the instrument's tick size            |
 | `exitPrice`          | Decimal(12,2)?     | client | Required when CLOSED, must be null when OPEN      |
@@ -55,18 +55,18 @@ is rejected (see [Input validation](#input-validation)).
 
 Rules for the trade payload a client sends, checked by the server before anything is saved:
 
-| Field          | Rule                                                                                     |
-| -------------- | ---------------------------------------------------------------------------------------- |
-| `instrumentId` | JSON integer, 1 to 2147483647 (Postgres `integer`); the instrument must exist            |
-| `direction`    | `"LONG"` or `"SHORT"`                                                                    |
-| `status`       | `"OPEN"` or `"CLOSED"`; optional, defaults to `"OPEN"`                                   |
-| `quantity`     | JSON integer, 1 to 2147483647                                                            |
-| `entryPrice`   | String, > 0, at most 10 integer digits and 2 decimal places, multiple of the tick size   |
-| `exitPrice`    | Same as `entryPrice`; null or omitted when OPEN                                          |
-| `enteredAt`    | ISO 8601 date-time string with `Z` or a UTC offset, e.g. `"2026-09-30T14:30:00-04:00"`   |
-| `exitedAt`     | Same as `enteredAt`; null or omitted when OPEN                                           |
-| `fees`         | String, >= 0, at most 8 integer digits and 2 decimal places; optional, defaults to `"0"` |
-| `notes`        | String of at most 10,000 characters; optional                                            |
+| Field          | Rule                                                                                               |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| `instrumentId` | JSON integer, 1 to 2147483647 (Postgres `integer`); the instrument must exist                      |
+| `direction`    | `"LONG"` or `"SHORT"`                                                                              |
+| `status`       | `"OPEN"` or `"CLOSED"`; on create optional, defaults to `"OPEN"`                                   |
+| `quantity`     | JSON integer, 1 to 2147483647                                                                      |
+| `entryPrice`   | String, > 0, at most 10 integer digits and 2 decimal places, multiple of the tick size             |
+| `exitPrice`    | Same as `entryPrice`; null or omitted when OPEN                                                    |
+| `enteredAt`    | ISO 8601 date-time string with `Z` or a UTC offset, e.g. `"2026-09-30T14:30:00-04:00"`             |
+| `exitedAt`     | Same as `enteredAt`; null or omitted when OPEN                                                     |
+| `fees`         | String, >= 0, at most 8 integer digits and 2 decimal places; on create optional, defaults to `"0"` |
+| `notes`        | String of at most 10,000 characters; optional                                                      |
 
 - Prices and fees sent as JSON numbers are rejected. Timestamps without `Z` or an offset are
   rejected, because they don't identify a single instant.
@@ -74,6 +74,15 @@ Rules for the trade payload a client sends, checked by the server before anythin
   `createdAt` and `updatedAt` are ignored. Any other unknown field (for example a typo such
   as `instrumntId`) is rejected.
 - A CLOSED trade is also rejected if its computed P&L is too large for its column.
+
+### Editing (`PUT /api/trades/:id`)
+
+`PUT` is a **full replacement** of every client-owned field: the trade becomes exactly what
+the body describes, plus the fields the server computes. The rules above apply, except:
+
+- `status` and `fees` are **required** (no defaults), so a forgotten field never silently
+  reopens a trade or resets its fees.
+- Omitted nullable fields mean `null`: leaving out `notes` clears the notes.
 
 ## Status rules
 
@@ -84,7 +93,8 @@ Rules for the trade payload a client sends, checked by the server before anythin
 | P&L fields              | null         | computed and stored |
 
 - **Closing** a trade: `PUT` with `status: "CLOSED"` plus `exitPrice` and `exitedAt`.
-- **Reopening** a trade: `PUT` with `status: "OPEN"`. The server clears the exit fields and P&L.
+- **Reopening** a trade: `PUT` with `status: "OPEN"` and no exit fields. The server clears
+  the exit fields and P&L. Sending exit fields with `status: "OPEN"` is rejected.
 - **Editing a CLOSED trade** always makes the server recalculate and overwrite its P&L,
   including when its instrument changes (see [Point value snapshot](#point-value-snapshot)).
 
@@ -94,7 +104,9 @@ Rules for the trade payload a client sends, checked by the server before anythin
   into `pointValueSnapshot`.
 - All P&L for that trade uses `pointValueSnapshot`, never the live Instrument row.
 - Changing the Instrument table afterwards does **not** change existing trades.
-- The snapshot changes only when an edit changes the trade's own `instrumentId`:
+- The snapshot changes only when an edit changes the trade's own `instrumentId`. An edit that
+  keeps the same instrument keeps the stored snapshot, even if the Instrument row's
+  `pointValue` has changed since.
 
 | Trade status when edited | What the server does in that same operation                                                                                                  |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -168,6 +180,8 @@ GET    /api/stats
 - `GET /api/trades/:id` returns **200** with the trade. `:id` must be canonical digits from
   1 to 2147483647 (no sign, leading zero, decimal point, exponent or whitespace).
 - `POST /api/trades` returns **201** with the created trade.
+- `PUT /api/trades/:id` returns **200** with the updated trade. The target is checked
+  before the body, so a missing trade is a 404 whatever was sent.
 - **400 validation error**: the payload broke a rule above. Each issue gives the field path
   (`[]` for the payload as a whole) and a message:
 
@@ -191,6 +205,7 @@ GET    /api/stats
 
 - **400 malformed JSON**: `{ "error": "Malformed JSON body" }`.
 - **404 missing trade**: a valid id with no trade returns `{ "error": "Trade not found" }`.
+  This includes a trade that disappears between a `PUT`'s lookup and its update.
 - **404**: any unknown `/api` route returns `{ "error": "Not found" }`.
 - **500**: any other failure, including database errors, returns
   `{ "error": "Internal server error" }`. Details are logged on the server, never sent.

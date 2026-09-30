@@ -1,5 +1,5 @@
-// Zod schemas for trade input: the payload that creates a trade, and the `:id` route param.
-// See docs/DATA_MODEL.md#input-validation.
+// Zod schemas for trade input: the payloads that create and replace a trade, and the `:id`
+// route param. See docs/DATA_MODEL.md#input-validation.
 //
 // Prices and fees stay strings (they are never converted to JavaScript numbers), and
 // timestamps become Date objects. Checks that need the database, such as whether the
@@ -49,55 +49,76 @@ function omitServerOwnedFields(input) {
   return rest;
 }
 
-const tradeFields = z
-  .strictObject({
-    instrumentId: z.int().min(1).max(INT4_MAX),
-    direction: z.enum(['LONG', 'SHORT']),
-    status: z.enum(['OPEN', 'CLOSED']).default('OPEN'),
-    quantity: z.int().min(1).max(INT4_MAX),
-    entryPrice: price,
-    exitPrice: price.nullish(),
-    enteredAt: timestamp,
-    exitedAt: timestamp.nullish(),
-    fees: fees.default('0'),
-    notes: z.string().max(NOTES_MAX_LENGTH).nullish(),
-  })
-  // Zod 4 also runs this when other fields already failed, so it only relies on values
-  // that passed: a valid status, and Date objects (not raw strings) for the time check.
-  .superRefine((trade, ctx) => {
-    if (trade.status === 'OPEN') {
-      for (const field of ['exitPrice', 'exitedAt']) {
-        if (trade[field] != null) {
-          ctx.addIssue({
-            code: 'custom',
-            path: [field],
-            message: 'must be empty while the trade is OPEN',
-          });
-        }
-      }
-      return;
-    }
-    if (trade.status !== 'CLOSED') return;
+// The rules for each client-owned field. Create and replace share these; they differ only in
+// which fields have defaults (see the two schemas below).
+const tradeFieldRules = {
+  instrumentId: z.int().min(1).max(INT4_MAX),
+  direction: z.enum(['LONG', 'SHORT']),
+  status: z.enum(['OPEN', 'CLOSED']),
+  quantity: z.int().min(1).max(INT4_MAX),
+  entryPrice: price,
+  exitPrice: price.nullish(),
+  enteredAt: timestamp,
+  exitedAt: timestamp.nullish(),
+  fees,
+  notes: z.string().max(NOTES_MAX_LENGTH).nullish(),
+};
 
+// The rules between fields, which depend on the status. Zod 4 also runs this when other
+// fields already failed, so it only relies on values that passed: a valid status, and Date
+// objects (not raw strings) for the time check.
+function checkStatusRules(trade, ctx) {
+  if (trade.status === 'OPEN') {
     for (const field of ['exitPrice', 'exitedAt']) {
-      if (trade[field] == null) {
-        ctx.addIssue({ code: 'custom', path: [field], message: 'is required for a CLOSED trade' });
+      if (trade[field] != null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'must be empty while the trade is OPEN',
+        });
       }
     }
-    if (
-      trade.exitedAt instanceof Date &&
-      trade.enteredAt instanceof Date &&
-      trade.exitedAt < trade.enteredAt
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['exitedAt'],
-        message: 'must be at or after enteredAt',
-      });
-    }
-  });
+    return;
+  }
+  if (trade.status !== 'CLOSED') return;
 
-export const createTradeSchema = z.preprocess(omitServerOwnedFields, tradeFields);
+  for (const field of ['exitPrice', 'exitedAt']) {
+    if (trade[field] == null) {
+      ctx.addIssue({ code: 'custom', path: [field], message: 'is required for a CLOSED trade' });
+    }
+  }
+  if (
+    trade.exitedAt instanceof Date &&
+    trade.enteredAt instanceof Date &&
+    trade.exitedAt < trade.enteredAt
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['exitedAt'],
+      message: 'must be at or after enteredAt',
+    });
+  }
+}
+
+// POST: `status` defaults to OPEN and `fees` to "0".
+export const createTradeSchema = z.preprocess(
+  omitServerOwnedFields,
+  z
+    .strictObject({
+      ...tradeFieldRules,
+      status: tradeFieldRules.status.default('OPEN'),
+      fees: tradeFieldRules.fees.default('0'),
+    })
+    .superRefine(checkStatusRules),
+);
+
+// PUT replaces every client-owned field, so nothing has a default: a forgotten `status`
+// must not silently reopen a CLOSED trade, nor a forgotten `fees` reset fees to 0. Omitted
+// nullable fields (`exitPrice`, `exitedAt`, `notes`) mean null.
+export const updateTradeSchema = z.preprocess(
+  omitServerOwnedFields,
+  z.strictObject(tradeFieldRules).superRefine(checkStatusRules),
+);
 
 // A trade id from a URL path segment: canonical decimal digits only (no sign, leading zero,
 // decimal point, exponent or whitespace), 1 to INT4_MAX. The regex caps the length before

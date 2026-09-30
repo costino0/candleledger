@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTradeSchema, tradeIdSchema } from './trade.js';
+import { createTradeSchema, tradeIdSchema, updateTradeSchema } from './trade.js';
 
 function openTrade(overrides = {}) {
   return {
@@ -308,5 +308,95 @@ describe('tradeIdSchema', () => {
 
   it.each([1, null, undefined])('rejects the non-string %j', (raw) => {
     expect(tradeIdSchema.safeParse(raw).success).toBe(false);
+  });
+});
+
+describe('updateTradeSchema', () => {
+  // A full replacement body: every non-nullable field, including status and fees.
+  function openBody(overrides = {}) {
+    return openTrade({ status: 'OPEN', fees: '0.00', ...overrides });
+  }
+
+  function updateIssuePaths(input) {
+    const result = updateTradeSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    return result.error.issues.map((issue) => issue.path.join('.'));
+  }
+
+  it('accepts a full OPEN body, with omitted nullable fields left undefined', () => {
+    const result = updateTradeSchema.safeParse(openBody());
+
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({
+      instrumentId: 2,
+      direction: 'LONG',
+      status: 'OPEN',
+      quantity: 2,
+      entryPrice: '18000.00',
+      enteredAt: new Date('2026-09-30T14:30:00Z'),
+      fees: '0.00',
+    });
+  });
+
+  it('accepts a full CLOSED body', () => {
+    const result = updateTradeSchema.safeParse(closedTrade({ notes: null }));
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      status: 'CLOSED',
+      exitPrice: '18010.25',
+      exitedAt: new Date('2026-09-30T15:00:00Z'),
+      fees: '2.48',
+      notes: null,
+    });
+  });
+
+  it('requires status instead of defaulting to OPEN', () => {
+    const { status, ...body } = closedTrade();
+    expect(status).toBe('CLOSED');
+
+    expect(updateIssuePaths(body)).toContain('status');
+  });
+
+  it('requires fees instead of defaulting to 0', () => {
+    expect(updateIssuePaths(openTrade({ status: 'OPEN' }))).toEqual(['fees']);
+  });
+
+  it('drops server-owned fields', () => {
+    const result = updateTradeSchema.safeParse(
+      openBody({ id: 99, pointValueSnapshot: '999.00', netPnl: '1.00', createdAt: 'x' }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('id');
+    expect(result.data).not.toHaveProperty('pointValueSnapshot');
+    expect(result.data).not.toHaveProperty('netPnl');
+    expect(result.data).not.toHaveProperty('createdAt');
+  });
+
+  it('rejects an unknown field', () => {
+    expect(updateIssuePaths(openBody({ instrumntId: 2 }))).toEqual(['']);
+  });
+
+  describe('shares the create rules', () => {
+    it('rejects a price sent as a JSON number', () => {
+      expect(updateIssuePaths(openBody({ entryPrice: 18000.25 }))).toEqual(['entryPrice']);
+    });
+
+    it('rejects exit fields on an OPEN trade', () => {
+      expect(
+        updateIssuePaths(openBody({ exitPrice: '18010.25', exitedAt: '2026-09-30T15:00:00Z' })),
+      ).toEqual(['exitPrice', 'exitedAt']);
+    });
+
+    it('requires exit fields on a CLOSED trade', () => {
+      expect(updateIssuePaths(openBody({ status: 'CLOSED' }))).toEqual(['exitPrice', 'exitedAt']);
+    });
+
+    it('rejects exitedAt before enteredAt', () => {
+      expect(updateIssuePaths(closedTrade({ exitedAt: '2026-09-30T14:00:00Z' }))).toEqual([
+        'exitedAt',
+      ]);
+    });
   });
 });
