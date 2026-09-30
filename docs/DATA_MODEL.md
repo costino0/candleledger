@@ -147,13 +147,49 @@ netPnl    = 41.00 − 2.48  = 38.52
 
 ## Stats (`GET /api/stats`)
 
-Computed over **CLOSED** trades only, using `decimal.js`, returned as strings:
+Computed on the server with `decimal.js` from one read of every trade:
 
-- total net P&L, total gross P&L, total fees
-- number of closed trades, number of open trades
-- wins (`netPnl > 0`), losses (`netPnl < 0`), break-evens (`netPnl = 0`)
-- win rate = wins ÷ closed trades
-- average win, average loss (USD)
+- Money totals and outcomes use **CLOSED** trades only. OPEN trades only add to `openTrades`.
+- They use each trade's **stored** `grossPnl`, `netPnl` and `fees`; nothing is recalculated.
+- A trade's outcome is set by its `netPnl`: a win if `> 0`, a loss if `< 0`, a
+  break-even if `= 0`.
+
+```json
+{
+  "totalNetPnl": "113.04",
+  "totalGrossPnl": "120.48",
+  "totalFees": "7.44",
+  "closedTrades": 4,
+  "openTrades": 1,
+  "wins": 2,
+  "losses": 1,
+  "breakEvens": 1,
+  "winRate": "50.00",
+  "averageWin": "69.27",
+  "averageLoss": "-25.50"
+}
+```
+
+| Field                                       | Meaning                                                        | When undefined     |
+| ------------------------------------------- | -------------------------------------------------------------- | ------------------ |
+| `totalNetPnl`, `totalGrossPnl`, `totalFees` | Sum over CLOSED trades                                         | `"0.00"` (no sum)  |
+| `closedTrades`, `openTrades`                | Number of trades with that status (JSON integers)              | `0`                |
+| `wins`, `losses`, `breakEvens`              | Number of CLOSED trades with that outcome (JSON integers)      | `0`                |
+| `winRate`                                   | Percentage: `wins ÷ closedTrades × 100`; break-evens count     | `null` (no CLOSED) |
+| `averageWin`                                | Sum of winning `netPnl` ÷ `wins`                               | `null` (no wins)   |
+| `averageLoss`                               | Sum of losing `netPnl` ÷ `losses`; **negative**, like `netPnl` | `null` (no losses) |
+
+- Every field is always present. Money and `winRate` are strings with exactly two decimal
+  places; `winRate` runs from `"0.00"` to `"100.00"`.
+- **Totals are exact.** They are sums of two-place values and are never rounded.
+- **`winRate` and the averages are rounded once**, half up (away from zero, so `-0.015`
+  becomes `"-0.02"`), to two places. Sums are exact first; only the final quotient is
+  rounded. This is the one place the server rounds: a quotient such as 100 ÷ 3 often has no
+  exact decimal value, and these values are computed on each request, never stored or used
+  in further arithmetic. Stored trade P&L is never rounded.
+- `-0.00` is never returned; zero is `"0.00"`.
+- A CLOSED trade with a null `grossPnl`, `netPnl` or `fees` breaks a server invariant.
+  Stats then fail with a 500 instead of skipping the trade.
 
 ## API (v0.1)
 
@@ -183,6 +219,8 @@ GET    /api/stats
 - `PUT /api/trades/:id` returns **200** with the updated trade. The target is checked
   before the body, so a missing trade is a 404 whatever was sent.
 - `DELETE /api/trades/:id` returns **204** with no body. The same `:id` rules apply.
+- `GET /api/stats` returns **200** with the stats object described in
+  [Stats](#stats-get-apistats), including when there are no trades.
 - **400 validation error**: the payload broke a rule above. Each issue gives the field path
   (`[]` for the payload as a whole) and a message:
 
