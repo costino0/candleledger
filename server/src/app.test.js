@@ -549,3 +549,166 @@ describe('GET /api/trades/:id', () => {
     expect(res.body).toEqual({ error: 'Internal server error' });
   });
 });
+
+describe('PUT /api/trades/:id', () => {
+  const UPDATED_AT = new Date('2026-10-01T09:00:00Z');
+
+  // A stand-in for the Prisma client with the calls updateTrade makes. Trade 7 is stored as
+  // an MNQ trade; `update` returns the row the way Prisma would.
+  function fakeUpdatePrisma({ existing = tradeRow() } = {}) {
+    return {
+      instrument: {
+        findUnique: vi.fn(async ({ where }) => INSTRUMENTS[where.id] ?? null),
+      },
+      trade: {
+        findUnique: vi.fn(async () =>
+          existing
+            ? {
+                instrumentId: existing.instrumentId,
+                pointValueSnapshot: existing.pointValueSnapshot,
+              }
+            : null,
+        ),
+        update: vi.fn(async ({ where, data }) => {
+          const row = { ...existing, id: where.id, ...data, updatedAt: UPDATED_AT };
+          for (const column of DECIMAL_COLUMNS) {
+            if (row[column] !== null) row[column] = new Decimal(row[column]);
+          }
+          return row;
+        }),
+      },
+    };
+  }
+
+  function putTrade(app, id, body) {
+    return request(app).put(`/api/trades/${id}`).send(body);
+  }
+
+  function prismaKnownError(code, message) {
+    return Object.assign(new Error(message), { name: 'PrismaClientKnownRequestError', code });
+  }
+
+  it('closes an OPEN trade and returns 200 with the serialized trade', async () => {
+    const prisma = fakeUpdatePrisma({
+      existing: tradeRow({ status: 'OPEN', exitPrice: null, exitedAt: null }),
+    });
+
+    const res = await putTrade(createApp({ prisma }), 7, closedTrade({ notes: 'Breakout' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ...SERIALIZED_TRADE, updatedAt: '2026-10-01T09:00:00.000Z' });
+  });
+
+  it('reopens a CLOSED trade with null exit and P&L fields', async () => {
+    const prisma = fakeUpdatePrisma();
+
+    const res = await putTrade(createApp({ prisma }), 7, openTrade({ status: 'OPEN', fees: '0' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'OPEN',
+      exitPrice: null,
+      exitedAt: null,
+      fees: '0.00',
+      pnlPoints: null,
+      grossPnl: null,
+      netPnl: null,
+      notes: null,
+    });
+  });
+
+  it('returns a JSON 404 when the trade does not exist', async () => {
+    const prisma = fakeUpdatePrisma({ existing: null });
+
+    const res = await putTrade(createApp({ prisma }), 999, closedTrade());
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Trade not found' });
+    expect(prisma.trade.update).not.toHaveBeenCalled();
+  });
+
+  it('returns a JSON 404 when the trade is deleted before the update runs', async () => {
+    const prisma = fakeUpdatePrisma();
+    prisma.trade.update.mockRejectedValue(prismaKnownError('P2025', 'record not found'));
+
+    const res = await putTrade(createApp({ prisma }), 7, closedTrade());
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Trade not found' });
+  });
+
+  it.each(['abc', '0', '-1', '1.5', '2147483648'])(
+    'returns a 400 validation error for the id %j without querying',
+    async (id) => {
+      const prisma = fakeUpdatePrisma();
+
+      const res = await putTrade(createApp({ prisma }), id, closedTrade());
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Validation failed',
+        issues: [
+          { path: ['id'], message: 'must be a positive integer no greater than 2147483647' },
+        ],
+      });
+      expect(prisma.trade.findUnique).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns a 400 validation error for an invalid body', async () => {
+    const prisma = fakeUpdatePrisma();
+
+    const res = await putTrade(createApp({ prisma }), 7, openTrade());
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(issuePaths(res)).toEqual([['status'], ['fees']]);
+    expect(prisma.trade.update).not.toHaveBeenCalled();
+  });
+
+  it('returns a JSON 400 for malformed JSON', async () => {
+    const prisma = fakeUpdatePrisma();
+
+    const res = await request(createApp({ prisma }))
+      .put('/api/trades/7')
+      .set('Content-Type', 'application/json')
+      .send('{"status": "OPEN",');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'Malformed JSON body' });
+    expect(prisma.trade.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 without leaking the message for an unrelated database error during update', async () => {
+    const consoleError = silenceConsoleError();
+    const prisma = fakeUpdatePrisma();
+    prisma.trade.update.mockRejectedValue(prismaKnownError('P1001', "Can't reach database"));
+
+    const res = await putTrade(createApp({ prisma }), 7, closedTrade());
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+    expect(res.text).not.toContain('reach database');
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 500 when the initial lookup fails', async () => {
+    silenceConsoleError();
+    const prisma = fakeUpdatePrisma();
+    prisma.trade.findUnique.mockRejectedValue(new Error('connection lost'));
+
+    const res = await putTrade(createApp({ prisma }), 7, closedTrade());
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+
+  it('returns the generic 404 for PUT /api/trades without an id', async () => {
+    const res = await request(createApp({ prisma: fakeUpdatePrisma() }))
+      .put('/api/trades')
+      .send(closedTrade());
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+  });
+});

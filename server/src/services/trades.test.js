@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import { describe, expect, it, vi } from 'vitest';
 import { NotFoundError, ValidationError } from '../errors.js';
-import { createTrade, getTrade, listTrades } from './trades.js';
+import { createTrade, getTrade, listTrades, updateTrade } from './trades.js';
 
 // Instrument rows as Prisma would return them. decimal.js Decimals stand in for the
 // decimal-like values Prisma returns; the service only calls `toFixed()` on them.
@@ -451,5 +451,367 @@ describe('getTrade', () => {
     const prisma = { trade: { findUnique: vi.fn().mockRejectedValue(dbError) } };
 
     await expect(getTrade(prisma, '1')).rejects.toBe(dbError);
+  });
+});
+
+describe('updateTrade', () => {
+  // Stored trade 5 is an MNQ trade whose snapshot is 2.00.
+  const TRADE_ID = 5;
+
+  // A stand-in for the Prisma client with only the calls updateTrade makes. `existing` is
+  // what the trade lookup selects; `instruments` maps ids to { pointValue, tickSize }.
+  function fakeUpdatePrisma({
+    existing = { instrumentId: ID.MNQ, pointValueSnapshot: new Decimal('2.00') },
+    instruments = INSTRUMENTS,
+  } = {}) {
+    return {
+      trade: {
+        findUnique: vi.fn(async () => existing),
+        update: vi.fn(async ({ where, data }) => ({ id: where.id, ...data })),
+      },
+      instrument: {
+        findUnique: vi.fn(async ({ where }) => {
+          const row = instruments[where.id];
+          return row ? { pointValue: row.pointValue, tickSize: row.tickSize } : null;
+        }),
+      },
+    };
+  }
+
+  // Full replacement bodies: status and fees are always sent.
+  function openBody(overrides = {}) {
+    return openTrade({ status: 'OPEN', fees: '0', ...overrides });
+  }
+  function closedBody(overrides = {}) {
+    return closedTrade(overrides);
+  }
+
+  // The `data` passed to the single trade.update call.
+  function updateData(prisma) {
+    expect(prisma.trade.update).toHaveBeenCalledTimes(1);
+    return prisma.trade.update.mock.calls[0][0].data;
+  }
+
+  const NULL_EXIT_AND_PNL = {
+    exitPrice: null,
+    exitedAt: null,
+    pnlPoints: null,
+    grossPnl: null,
+    netPnl: null,
+  };
+
+  function prismaKnownError(code, message) {
+    return Object.assign(new Error(message), { name: 'PrismaClientKnownRequestError', code });
+  }
+
+  describe('transitions', () => {
+    it('OPEN → OPEN: writes the edited fields with null exit and P&L', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), openBody({ quantity: 5, notes: 'scaled' }));
+
+      expect(updateData(prisma)).toEqual({
+        instrumentId: ID.MNQ,
+        direction: 'LONG',
+        status: 'OPEN',
+        quantity: 5,
+        entryPrice: '18000.00',
+        enteredAt: new Date('2026-09-30T14:30:00Z'),
+        fees: '0',
+        pointValueSnapshot: '2',
+        notes: 'scaled',
+        ...NULL_EXIT_AND_PNL,
+      });
+    });
+
+    it('OPEN → CLOSED: calculates P&L from the stored snapshot', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), closedBody());
+
+      expect(updateData(prisma)).toMatchObject({
+        status: 'CLOSED',
+        exitPrice: '18010.25',
+        exitedAt: new Date('2026-09-30T15:00:00Z'),
+        pointValueSnapshot: '2',
+        pnlPoints: '10.25',
+        grossPnl: '41.00',
+        netPnl: '38.52',
+      });
+    });
+
+    it('CLOSED → OPEN: overwrites exit and P&L fields with null', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), openBody());
+
+      expect(updateData(prisma)).toMatchObject({ status: 'OPEN', ...NULL_EXIT_AND_PNL });
+    });
+
+    it('CLOSED → CLOSED: recalculates P&L even when only notes change', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), closedBody({ notes: 'reviewed' }));
+
+      expect(updateData(prisma)).toMatchObject({
+        notes: 'reviewed',
+        pnlPoints: '10.25',
+        grossPnl: '41.00',
+        netPnl: '38.52',
+      });
+    });
+
+    it('CLOSED → CLOSED: uses the new quantity and fees', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), closedBody({ quantity: 3, fees: '3.72' }));
+
+      // 10.25 × 2 × 3 = 61.50; 61.50 − 3.72 = 57.78
+      expect(updateData(prisma)).toMatchObject({ grossPnl: '61.50', netPnl: '57.78' });
+    });
+  });
+
+  describe('instrument and snapshot', () => {
+    it("keeps the stored snapshot when the instrument is unchanged, even if the instrument's point value changed", async () => {
+      const prisma = fakeUpdatePrisma({
+        instruments: {
+          ...INSTRUMENTS,
+          [ID.MNQ]: { pointValue: new Decimal('4.00'), tickSize: new Decimal('0.2500') },
+        },
+      });
+
+      await updateTrade(prisma, String(TRADE_ID), closedBody());
+
+      expect(updateData(prisma)).toMatchObject({
+        pointValueSnapshot: '2',
+        grossPnl: '41.00',
+        netPnl: '38.52',
+      });
+    });
+
+    it('takes a new snapshot when an OPEN trade changes instrument', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), openBody({ instrumentId: ID.NQ }));
+
+      expect(updateData(prisma)).toMatchObject({
+        instrumentId: ID.NQ,
+        pointValueSnapshot: '20',
+        ...NULL_EXIT_AND_PNL,
+      });
+    });
+
+    it('takes a new snapshot and recalculates P&L in the same update when a CLOSED trade changes instrument', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(prisma, String(TRADE_ID), closedBody({ instrumentId: ID.NQ }));
+
+      // 10.25 × 20 × 2 = 410.00; 410.00 − 2.48 = 407.52
+      expect(updateData(prisma)).toMatchObject({
+        instrumentId: ID.NQ,
+        pointValueSnapshot: '20',
+        pnlPoints: '10.25',
+        grossPnl: '410.00',
+        netPnl: '407.52',
+      });
+    });
+
+    it("checks prices against the new instrument's tick size", async () => {
+      const prisma = fakeUpdatePrisma({
+        instruments: {
+          ...INSTRUMENTS,
+          9: { pointValue: new Decimal('10.00'), tickSize: new Decimal('0.5000') },
+        },
+      });
+
+      // 18010.25 fits MNQ's 0.25 tick but not the new instrument's 0.50 tick.
+      const error = await updateTrade(
+        prisma,
+        String(TRADE_ID),
+        closedBody({ instrumentId: 9 }),
+      ).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues).toEqual([
+        { path: ['exitPrice'], message: "must be a multiple of the instrument's tick size (0.5)" },
+      ]);
+      expect(prisma.trade.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an instrument that does not exist', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      const error = await updateTrade(
+        prisma,
+        String(TRADE_ID),
+        openBody({ instrumentId: 404 }),
+      ).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues).toEqual([
+        { path: ['instrumentId'], message: 'instrument 404 does not exist' },
+      ]);
+      expect(prisma.trade.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('server-owned fields from the client', () => {
+    it('ignores stale P&L, snapshot and id values, updating the trade from the URL', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      await updateTrade(
+        prisma,
+        String(TRADE_ID),
+        closedBody({
+          id: 99,
+          pointValueSnapshot: '999.00',
+          pnlPoints: '1.00',
+          grossPnl: '1.00',
+          netPnl: '1000000.00',
+          createdAt: '2020-01-01T00:00:00Z',
+          updatedAt: '2020-01-01T00:00:00Z',
+        }),
+      );
+
+      const { where, data } = prisma.trade.update.mock.calls[0][0];
+      expect(where).toEqual({ id: TRADE_ID });
+      expect(data).toMatchObject({
+        pointValueSnapshot: '2',
+        pnlPoints: '10.25',
+        grossPnl: '41.00',
+        netPnl: '38.52',
+      });
+      expect(data).not.toHaveProperty('id');
+      expect(data).not.toHaveProperty('createdAt');
+      expect(data).not.toHaveProperty('updatedAt');
+    });
+  });
+
+  describe('rejections', () => {
+    it.each(['abc', '0', '-1', '1.5', '2147483648'])(
+      'rejects the id %j without querying',
+      async (raw) => {
+        const prisma = fakeUpdatePrisma();
+        const error = await updateTrade(prisma, raw, openBody()).catch((e) => e);
+
+        expect(error).toBeInstanceOf(ValidationError);
+        expect(error.issues).toEqual([
+          { path: ['id'], message: 'must be a positive integer no greater than 2147483647' },
+        ]);
+        expect(prisma.trade.findUnique).not.toHaveBeenCalled();
+      },
+    );
+
+    it('throws NotFoundError when the initial lookup finds no trade', async () => {
+      const prisma = fakeUpdatePrisma({ existing: null });
+      const error = await updateTrade(prisma, '404', openBody()).catch((e) => e);
+
+      expect(error).toBeInstanceOf(NotFoundError);
+      expect(error.message).toBe('Trade not found');
+      expect(prisma.trade.findUnique).toHaveBeenCalledWith({
+        where: { id: 404 },
+        select: { instrumentId: true, pointValueSnapshot: true },
+      });
+      expect(prisma.trade.update).not.toHaveBeenCalled();
+    });
+
+    it('checks that the trade exists before validating the body', async () => {
+      const prisma = fakeUpdatePrisma({ existing: null });
+      const error = await updateTrade(prisma, '404', {}).catch((e) => e);
+
+      expect(error).toBeInstanceOf(NotFoundError);
+      expect(prisma.instrument.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invalid body without updating', async () => {
+      const prisma = fakeUpdatePrisma();
+      const error = await updateTrade(prisma, String(TRADE_ID), openTrade()).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues.map((issue) => issue.path)).toEqual([['status'], ['fees']]);
+      expect(prisma.trade.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects P&L too large for its column', async () => {
+      const prisma = fakeUpdatePrisma();
+      const error = await updateTrade(
+        prisma,
+        String(TRADE_ID),
+        closedBody({
+          instrumentId: ID.NQ,
+          entryPrice: '0.25',
+          exitPrice: '9999999999.75',
+          quantity: 10,
+          fees: '0',
+        }),
+      ).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues.map((issue) => issue.message)).toEqual([
+        'grossPnl 1999999999900.00 is too large to store',
+        'netPnl 1999999999900.00 is too large to store',
+      ]);
+      expect(prisma.trade.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('behaviour', () => {
+    it('makes exactly one update, writing every writable column', async () => {
+      const prisma = fakeUpdatePrisma();
+
+      const result = await updateTrade(prisma, String(TRADE_ID), closedBody());
+
+      expect(prisma.trade.update).toHaveBeenCalledTimes(1);
+      const { where, data } = prisma.trade.update.mock.calls[0][0];
+      expect(where).toEqual({ id: TRADE_ID });
+      expect(Object.keys(data).sort()).toEqual([...DATA_KEYS].sort());
+      expect(result).toEqual({ id: TRADE_ID, ...data });
+    });
+
+    it('throws NotFoundError when the trade is deleted before the update runs', async () => {
+      const prisma = fakeUpdatePrisma();
+      prisma.trade.update.mockRejectedValue(
+        prismaKnownError(
+          'P2025',
+          'An operation failed because it depends on one or more records that were required but not found',
+        ),
+      );
+
+      const error = await updateTrade(prisma, String(TRADE_ID), openBody()).catch((e) => e);
+
+      expect(error).toBeInstanceOf(NotFoundError);
+      expect(error.message).toBe('Trade not found');
+    });
+
+    it.each([
+      ['a plain error', new Error('connection lost')],
+      ['a different Prisma error code', prismaKnownError('P2003', 'Foreign key constraint')],
+      [
+        'a P2025 code on an error that is not from Prisma',
+        Object.assign(new Error('x'), { code: 'P2025' }),
+      ],
+    ])('passes %s from trade.update through unchanged', async (_, dbError) => {
+      const prisma = fakeUpdatePrisma();
+      prisma.trade.update.mockRejectedValue(dbError);
+
+      await expect(updateTrade(prisma, String(TRADE_ID), openBody())).rejects.toBe(dbError);
+    });
+
+    it('passes errors from the initial trade lookup through unchanged', async () => {
+      const prisma = fakeUpdatePrisma();
+      const dbError = prismaKnownError('P2025', 'not found');
+      prisma.trade.findUnique.mockRejectedValue(dbError);
+
+      await expect(updateTrade(prisma, String(TRADE_ID), openBody())).rejects.toBe(dbError);
+    });
+
+    it('does not mutate its input', async () => {
+      const input = closedBody({ pointValueSnapshot: '999.00' });
+      const copy = structuredClone(input);
+
+      await updateTrade(fakeUpdatePrisma(), String(TRADE_ID), input);
+
+      expect(input).toEqual(copy);
+    });
   });
 });
