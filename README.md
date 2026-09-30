@@ -44,6 +44,25 @@ npm run dev
 - Client: http://localhost:5173
 - API: http://localhost:3001 (the client proxies `/api` to it)
 
+## Database setup
+
+The schema lives in `server/prisma/schema.prisma` and the committed migrations in
+`server/prisma/migrations/`. With `DATABASE_URL` set in `server/.env`, run these in order:
+
+```bash
+npm run db:deploy -w server     # apply the committed migrations
+npm run db:generate -w server   # generate the Prisma client (not done automatically in Prisma 7)
+npm run db:seed -w server       # insert or update the instruments NQ, MNQ, ES, MES
+npm run db:verify -w server     # check tables and instrument rows; exits 1 on failure
+```
+
+- The seed is idempotent: it upserts each instrument by symbol, so it is safe to run again.
+  It never deletes anything.
+- `npm run db:status -w server` shows whether any migration is still unapplied.
+- `db:deploy` only applies committed migrations and needs no extra database permissions.
+  Creating new migrations (`npm run db:migrate -w server`, i.e. `prisma migrate dev`)
+  needs a shadow database, so do that against a local PostgreSQL database, not the hosted one.
+
 ## Scripts
 
 Run from the repository root:
