@@ -154,3 +154,24 @@ PUT    /api/trades/:id
 DELETE /api/trades/:id
 GET    /api/stats
 ```
+
+### Responses and errors
+
+- **Trade bodies** list every Trade column (no relations). Decimal fields are strings with
+  exactly two decimal places (`"18000.00"`, `"0.00"`); timestamps are ISO 8601 strings in
+  UTC (`"2026-09-30T14:30:00.000Z"`); unset optional fields are `null`, never omitted.
+- `POST /api/trades` returns **201** with the created trade.
+- **400 validation error**: the payload broke a rule above. Each issue gives the field path
+  (`[]` for the payload as a whole) and a message:
+
+  ```json
+  {
+    "error": "Validation failed",
+    "issues": [{ "path": ["entryPrice"], "message": "must be greater than 0" }]
+  }
+  ```
+
+- **400 malformed JSON**: `{ "error": "Malformed JSON body" }`.
+- **404**: any unknown `/api` route returns `{ "error": "Not found" }`.
+- **500**: any other failure, including database errors, returns
+  `{ "error": "Internal server error" }`. Details are logged on the server, never sent.
