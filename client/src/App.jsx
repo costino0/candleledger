@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { loadDashboard } from './api.js';
+import AddTradeForm from './components/AddTradeForm.jsx';
 import StatsPanel from './components/StatsPanel.jsx';
 import TradesTable from './components/TradesTable.jsx';
 
@@ -10,6 +11,8 @@ import TradesTable from './components/TradesTable.jsx';
 export default function App() {
   const [state, setState] = useState({ status: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
+  const [formOpen, setFormOpen] = useState(false);
+  const [justAdded, setJustAdded] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -29,8 +32,22 @@ export default function App() {
   }, [reloadKey]);
 
   function retry() {
+    setJustAdded(false);
     setState({ status: 'loading' });
     setReloadKey((key) => key + 1);
+  }
+
+  // After a trade is created, trades and stats are loaded from the server again. The current
+  // dashboard stays on screen until the new data replaces it.
+  function handleCreated() {
+    setFormOpen(false);
+    setJustAdded(true);
+    setReloadKey((key) => key + 1);
+  }
+
+  function openForm() {
+    setJustAdded(false);
+    setFormOpen(true);
   }
 
   return (
@@ -59,6 +76,20 @@ export default function App() {
 
       {state.status === 'ready' && (
         <>
+          {formOpen ? (
+            <AddTradeForm
+              instruments={state.instruments}
+              onCreated={handleCreated}
+              onCancel={() => setFormOpen(false)}
+            />
+          ) : (
+            <div className="toolbar">
+              <button type="button" className="button-primary" onClick={openForm}>
+                Add trade
+              </button>
+              {justAdded && <p role="status">Trade added.</p>}
+            </div>
+          )}
           <StatsPanel stats={state.stats} />
           <TradesTable trades={state.trades} instruments={state.instruments} />
         </>

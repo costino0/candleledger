@@ -104,15 +104,19 @@ function jsonResponse(body, status = 200) {
   });
 }
 
-// Stubs fetch with one response factory per API path.
+// Stubs fetch with one response factory per API path. GET routes are keyed by path alone,
+// other methods by "METHOD path". Each factory gets the request's init object.
 function stubApi(overrides = {}) {
   const routes = {
     '/api/instruments': () => jsonResponse(INSTRUMENTS),
     '/api/trades': () => jsonResponse([OPEN_TRADE, LOSING_TRADE, WINNING_TRADE]),
     '/api/stats': () => jsonResponse(STATS),
+    'POST /api/trades': () => jsonResponse(OPEN_TRADE, 201),
     ...overrides,
   };
-  const fetchMock = vi.fn(async (path) => routes[path]());
+  const fetchMock = vi.fn(async (path, init = {}) =>
+    routes[init.method ? `${init.method} ${path}` : path](init),
+  );
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
@@ -132,6 +136,7 @@ function rowCells(rowIndex) {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe('App', () => {
@@ -356,3 +361,285 @@ function stubResponse(path) {
   };
   return jsonResponse(bodies[path]);
 }
+
+// The bodies of every POST /api/trades request the mock received.
+function postedBodies(fetchMock) {
+  return fetchMock.mock.calls
+    .filter(([, init]) => init?.method === 'POST')
+    .map(([, init]) => JSON.parse(init.body));
+}
+
+function getCount(fetchMock) {
+  return fetchMock.mock.calls.filter(([, init]) => !init?.method).length;
+}
+
+async function openForm() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Add trade' }));
+  return screen.getByRole('region', { name: 'Add trade' });
+}
+
+function change(label, value) {
+  fireEvent.change(screen.getByLabelText(label), { target: { value } });
+}
+
+function fillOpenTrade() {
+  change('Instrument', '2');
+  change('Direction', 'SHORT');
+  change('Entry price', '18000.25');
+  change('Entered at', '2026-09-30T14:30');
+}
+
+function save() {
+  fireEvent.click(screen.getByRole('button', { name: 'Save trade' }));
+}
+
+describe('Add trade', () => {
+  it('opens a form with instrument choices from the instruments response', async () => {
+    stubApi();
+    render(<App />);
+    await openForm();
+
+    const options = within(screen.getByLabelText('Instrument'))
+      .getAllByRole('option')
+      .map((option) => [option.value, option.textContent]);
+    expect(options).toEqual([
+      ['', 'Choose…'],
+      ['1', 'NQ — E-mini Nasdaq-100'],
+      ['2', 'MNQ — Micro E-mini Nasdaq-100'],
+      ['3', 'ES — E-mini S&P 500'],
+      ['4', 'MES — Micro E-mini S&P 500'],
+    ]);
+    expect(document.activeElement).toBe(screen.getByLabelText('Instrument'));
+    expect(screen.queryByRole('button', { name: 'Add trade' })).toBeNull();
+  });
+
+  it('starts with the documented defaults and no exit fields', async () => {
+    stubApi();
+    render(<App />);
+    await openForm();
+
+    expect(screen.getByLabelText('Instrument').value).toBe('');
+    expect(screen.getByLabelText('Direction').value).toBe('');
+    expect(screen.getByLabelText('OPEN').checked).toBe(true);
+    expect(screen.getByLabelText('Quantity').value).toBe('1');
+    expect(screen.getByLabelText('Entered at').value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+    expect(screen.getByLabelText('Fees (USD, whole trade)').value).toBe('0');
+    expect(screen.queryByLabelText('Exit price')).toBeNull();
+    expect(screen.queryByLabelText('Exited at')).toBeNull();
+  });
+
+  it('creates an OPEN trade, then reloads trades and stats from the server', async () => {
+    let created = false;
+    const fetchMock = stubApi({
+      'POST /api/trades': () => {
+        created = true;
+        return jsonResponse(OPEN_TRADE, 201);
+      },
+      '/api/trades': () => jsonResponse(created ? [OPEN_TRADE] : []),
+      '/api/stats': () => jsonResponse(created ? STATS : EMPTY_STATS),
+    });
+    render(<App />);
+    await screen.findByText('No trades yet.');
+    await openForm();
+
+    fillOpenTrade();
+    change('Notes', '  waited for the retest ');
+    save();
+
+    expect(await screen.findByText('Trade added.')).toBeTruthy();
+    expect(postedBodies(fetchMock)).toEqual([
+      {
+        instrumentId: 2,
+        direction: 'SHORT',
+        status: 'OPEN',
+        quantity: 1,
+        entryPrice: '18000.25',
+        enteredAt: '2026-09-30T14:30:00.000Z',
+        fees: '0',
+        notes: '  waited for the retest ',
+      },
+    ]);
+    expect(screen.queryByRole('region', { name: 'Add trade' })).toBeNull();
+
+    // Everything shown now comes from the second load.
+    await screen.findByRole('table');
+    expect(getCount(fetchMock)).toBe(6);
+    expect(statValue('Net P&L').textContent).toBe('$12,345,678,901,234,567.89');
+    expect(statValue('Open trades').textContent).toBe('1');
+  });
+
+  it('shows exit fields for a CLOSED trade and sends them', async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    fireEvent.click(screen.getByLabelText('CLOSED'));
+    change('Exit price', '18005.75');
+    change('Exited at', '2026-09-30T15:00');
+    change('Fees (USD, whole trade)', '2.50');
+    save();
+
+    await screen.findByText('Trade added.');
+    expect(postedBodies(fetchMock)).toEqual([
+      {
+        instrumentId: 2,
+        direction: 'SHORT',
+        status: 'CLOSED',
+        quantity: 1,
+        entryPrice: '18000.25',
+        enteredAt: '2026-09-30T14:30:00.000Z',
+        exitPrice: '18005.75',
+        exitedAt: '2026-09-30T15:00:00.000Z',
+        fees: '2.50',
+      },
+    ]);
+  });
+
+  it('hides and does not send exit values after switching back to OPEN', async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    fireEvent.click(screen.getByLabelText('CLOSED'));
+    change('Exit price', '18005.75');
+    change('Exited at', '2026-09-30T15:00');
+    fireEvent.click(screen.getByLabelText('OPEN'));
+
+    expect(screen.queryByLabelText('Exit price')).toBeNull();
+    expect(screen.queryByLabelText('Exited at')).toBeNull();
+
+    save();
+    await screen.findByText('Trade added.');
+    const [body] = postedBodies(fetchMock);
+    expect(body.status).toBe('OPEN');
+    expect(body).not.toHaveProperty('exitPrice');
+    expect(body).not.toHaveProperty('exitedAt');
+  });
+
+  it('shows server validation issues next to their fields and keeps the values', async () => {
+    stubApi({
+      'POST /api/trades': () =>
+        jsonResponse(
+          {
+            error: 'Validation failed',
+            issues: [
+              { path: ['entryPrice'], message: "must be a multiple of the instrument's tick size" },
+              { path: ['instrumentId'], message: 'Invalid input: expected number' },
+              { path: [], message: 'netPnl 1e13 is too large to store' },
+            ],
+          },
+          400,
+        ),
+    });
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    change('Entry price', '18000.10');
+    save();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Could not save the trade.');
+    expect(alert.textContent).toContain('netPnl 1e13 is too large to store');
+
+    const entryPrice = screen.getByLabelText('Entry price');
+    expect(entryPrice.getAttribute('aria-invalid')).toBe('true');
+    const entryError = document.getElementById(entryPrice.getAttribute('aria-describedby'));
+    expect(entryError.textContent).toBe(
+      "Entry price must be a multiple of the instrument's tick size",
+    );
+
+    const instrument = screen.getByLabelText('Instrument');
+    expect(document.getElementById(instrument.getAttribute('aria-describedby')).textContent).toBe(
+      'Invalid input: expected number',
+    );
+
+    expect(screen.getByLabelText('Direction').getAttribute('aria-invalid')).toBeNull();
+    expect(entryPrice.value).toBe('18000.10');
+    expect(screen.getByRole('button', { name: 'Save trade' }).matches(':disabled')).toBe(false);
+  });
+
+  it('shows a general error for a failure that is not a validation error', async () => {
+    const fetchMock = stubApi({
+      'POST /api/trades': () => jsonResponse({ error: 'Internal server error' }, 500),
+    });
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    save();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not save the trade. Internal server error (HTTP 500)');
+    expect(screen.getByLabelText('Entry price').value).toBe('18000.25');
+    expect(screen.queryByText('Trade added.')).toBeNull();
+    // The dashboard is not reloaded when nothing was created.
+    expect(getCount(fetchMock)).toBe(3);
+  });
+
+  it('disables the form while the request is in flight', async () => {
+    let respond;
+    const fetchMock = stubApi({
+      'POST /api/trades': () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+    });
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    save();
+
+    const saving = screen.getByRole('button', { name: 'Saving…' });
+    expect(saving.matches(':disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Cancel' }).matches(':disabled')).toBe(true);
+    expect(screen.getByLabelText('Entry price').matches(':disabled')).toBe(true);
+
+    fireEvent.submit(saving.closest('form'));
+    expect(postedBodies(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      respond(jsonResponse({ error: 'Internal server error' }, 500));
+    });
+    expect(screen.getByRole('button', { name: 'Save trade' }).matches(':disabled')).toBe(false);
+  });
+
+  it('closes the form on Cancel without sending anything', async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('region', { name: 'Add trade' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add trade' })).toBeTruthy();
+    expect(postedBodies(fetchMock)).toEqual([]);
+  });
+
+  it('shows a field error and does not submit a local time that does not exist', async (context) => {
+    // Node applies a TZ change at runtime. If this environment doesn't, skip rather than
+    // test the wrong zone.
+    vi.stubEnv('TZ', 'America/New_York');
+    if (new Date(2026, 0, 1).getTimezoneOffset() !== 300) context.skip();
+
+    const fetchMock = stubApi();
+    render(<App />);
+    await openForm();
+
+    fillOpenTrade();
+    // New York clocks jump from 02:00 to 03:00 on 2026-03-08.
+    change('Entered at', '2026-03-08T02:30');
+    save();
+
+    const enteredAt = screen.getByLabelText('Entered at');
+    expect(enteredAt.getAttribute('aria-invalid')).toBe('true');
+    expect(document.getElementById(enteredAt.getAttribute('aria-describedby')).textContent).toBe(
+      'Entered at is not a valid time in your time zone',
+    );
+    expect(postedBodies(fetchMock)).toEqual([]);
+  });
+});
