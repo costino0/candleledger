@@ -47,9 +47,9 @@ A tradable futures contract. The server seeds these four rows.
 | `createdAt`          | Timestamptz        | server |                                                   |
 | `updatedAt`          | Timestamptz        | server |                                                   |
 
-Fields marked **server** are never accepted from the client. If a request includes them,
-they are ignored. Any other field not in this table is rejected (see
-[Input validation](#input-validation)).
+Fields marked **server** are never trusted from client input. If a request includes them,
+they are ignored and the server supplies its own values. Any other field not in this table
+is rejected (see [Input validation](#input-validation)).
 
 ## Input validation
 
