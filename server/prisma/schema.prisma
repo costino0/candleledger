@@ -1,0 +1,64 @@
+// CandleLedger v0.1 database schema.
+// See docs/DATA_MODEL.md for the rules the server enforces on top of this schema.
+
+// TEMPORARY: `prisma-client-js` generates plain JavaScript into node_modules/@prisma/client,
+// which suits the JavaScript phase. Replace it with the modern `prisma-client` generator
+// (which emits TypeScript) during the v0.3 TypeScript migration. See docs/ROADMAP.md.
+generator client {
+  provider = "prisma-client-js"
+}
+
+// The connection URL is supplied by prisma.config.js (from DATABASE_URL).
+datasource db {
+  provider = "postgresql"
+}
+
+enum Direction {
+  LONG
+  SHORT
+}
+
+enum TradeStatus {
+  OPEN
+  CLOSED
+}
+
+// A tradable futures contract. Seeded by the server: NQ, MNQ, ES, MES.
+model Instrument {
+  id         Int     @id @default(autoincrement())
+  symbol     String  @unique
+  name       String
+  pointValue Decimal @db.Decimal(10, 2) // US dollars per 1.00 point
+  tickSize   Decimal @db.Decimal(10, 4) // minimum price increment
+  trades     Trade[]
+}
+
+model Trade {
+  id           Int         @id @default(autoincrement())
+  instrument   Instrument  @relation(fields: [instrumentId], references: [id])
+  instrumentId Int
+  direction    Direction
+  status       TradeStatus @default(OPEN)
+  quantity     Int // whole contracts, > 0
+  entryPrice   Decimal     @db.Decimal(12, 2)
+  exitPrice    Decimal?    @db.Decimal(12, 2) // required when CLOSED, null when OPEN
+  enteredAt    DateTime    @db.Timestamptz(3)
+  exitedAt     DateTime?   @db.Timestamptz(3) // required when CLOSED, null when OPEN
+  fees         Decimal     @default(0) @db.Decimal(10, 2) // total US dollars for the whole trade
+
+  // Copied by the server from the selected Instrument when the trade is created.
+  // Never accepted from the client. Later edits to the Instrument table do not change it.
+  pointValueSnapshot Decimal @db.Decimal(10, 2)
+
+  // Computed by the server only; null while OPEN. Recalculated on every edit of a CLOSED trade.
+  pnlPoints Decimal? @db.Decimal(12, 2)
+  grossPnl  Decimal? @db.Decimal(14, 2)
+  netPnl    Decimal? @db.Decimal(14, 2)
+
+  notes     String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([instrumentId])
+  @@index([enteredAt])
+}

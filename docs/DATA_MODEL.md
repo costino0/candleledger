@@ -1,0 +1,131 @@
+# CandleLedger v0.1 Data Model
+
+This document describes the v0.1 data model and the rules the server enforces on it.
+The schema itself lives in [`server/prisma/schema.prisma`](../server/prisma/schema.prisma).
+
+## Scope
+
+v0.1 supports futures only: **NQ, MNQ, ES, MES**.
+One trade has exactly one entry and at most one exit, for a whole number of contracts.
+
+Not in v0.1: partial fills, multiple executions, screenshots, authentication,
+broker integrations, market data, other instruments, multiple accounts.
+
+## Instrument
+
+A tradable futures contract. The server seeds these four rows.
+
+| symbol | name                    | pointValue (USD) | tickSize |
+| ------ | ----------------------- | ---------------: | -------: |
+| NQ     | E-mini Nasdaq-100       |            20.00 |     0.25 |
+| MNQ    | Micro E-mini Nasdaq-100 |             2.00 |     0.25 |
+| ES     | E-mini S&P 500          |            50.00 |     0.25 |
+| MES    | Micro E-mini S&P 500    |             5.00 |     0.25 |
+
+- `pointValue`: dollars gained or lost per 1.00 point move, per contract.
+- `tickSize`: minimum price increment. Entry and exit prices must be multiples of it.
+
+## Trade
+
+| Field                | Type               | Set by | Notes                                             |
+| -------------------- | ------------------ | ------ | ------------------------------------------------- |
+| `id`                 | Int                | server |                                                   |
+| `instrumentId`       | Int                | client | Must reference an existing Instrument             |
+| `direction`          | `LONG` \| `SHORT`  | client |                                                   |
+| `status`             | `OPEN` \| `CLOSED` | client | Explicit; defaults to `OPEN`                      |
+| `quantity`           | Int                | client | Whole contracts, > 0                              |
+| `entryPrice`         | Decimal(12,2)      | client | Multiple of the instrument's tick size            |
+| `exitPrice`          | Decimal(12,2)?     | client | Required when CLOSED, must be null when OPEN      |
+| `enteredAt`          | Timestamptz        | client | Stored in UTC                                     |
+| `exitedAt`           | Timestamptz?       | client | Required when CLOSED, must be null when OPEN      |
+| `fees`               | Decimal(10,2)      | client | Total USD for the whole trade, >= 0, default 0    |
+| `pointValueSnapshot` | Decimal(10,2)      | server | See [Point value snapshot](#point-value-snapshot) |
+| `pnlPoints`          | Decimal(12,2)?     | server | Null while OPEN                                   |
+| `grossPnl`           | Decimal(14,2)?     | server | Null while OPEN                                   |
+| `netPnl`             | Decimal(14,2)?     | server | Null while OPEN                                   |
+| `notes`              | String?            | client |                                                   |
+| `createdAt`          | Timestamptz        | server |                                                   |
+| `updatedAt`          | Timestamptz        | server |                                                   |
+
+Fields marked **server** are never accepted from the client. If a request includes them,
+they are ignored.
+
+## Status rules
+
+|                         | OPEN         | CLOSED              |
+| ----------------------- | ------------ | ------------------- |
+| `exitPrice`, `exitedAt` | must be null | required            |
+| `exitedAt >= enteredAt` | n/a          | required            |
+| P&L fields              | null         | computed and stored |
+
+- **Closing** a trade: `PUT` with `status: "CLOSED"` plus `exitPrice` and `exitedAt`.
+- **Reopening** a trade: `PUT` with `status: "OPEN"`. The server clears the exit fields and P&L.
+- **Editing a CLOSED trade** always makes the server recalculate and overwrite its P&L,
+  including when its instrument changes (see [Point value snapshot](#point-value-snapshot)).
+
+## Point value snapshot
+
+- When a trade is **created**, the server copies the selected Instrument's `pointValue`
+  into `pointValueSnapshot`.
+- All P&L for that trade uses `pointValueSnapshot`, never the live Instrument row.
+- Changing the Instrument table afterwards does **not** change existing trades.
+- The snapshot changes only when an edit changes the trade's own `instrumentId`:
+
+| Trade status when edited | What the server does in that same operation                                                                                                  |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| OPEN                     | Replaces `pointValueSnapshot` with the new Instrument's `pointValue`. P&L fields stay null.                                                  |
+| CLOSED                   | Replaces `pointValueSnapshot` with the new Instrument's `pointValue`, then recalculates and overwrites `pnlPoints`, `grossPnl` and `netPnl`. |
+
+For a CLOSED trade, the new snapshot and the recalculated P&L are saved in a single
+database write, so a trade is never stored with a snapshot that doesn't match its P&L.
+Prices are checked against the **new** instrument's tick size.
+
+## P&L calculation
+
+The server is the single source of truth for P&L.
+
+```
+sign      = LONG → +1, SHORT → −1
+pnlPoints = (exitPrice − entryPrice) × sign
+grossPnl  = pnlPoints × pointValueSnapshot × quantity
+netPnl    = grossPnl − fees
+```
+
+Example: LONG 2 MNQ, entry 18000.00, exit 18010.25, fees $2.48
+
+```
+pnlPoints = 10.25
+grossPnl  = 10.25 × 2 × 2 = 41.00
+netPnl    = 41.00 − 2.48  = 38.52
+```
+
+### Precision rules
+
+- All monetary and price arithmetic uses `decimal.js`, never JavaScript `number`.
+- Prices, fees, point values and P&L are sent and received in JSON as **strings**
+  (for example `"18000.25"`, `"38.52"`). The client formats them for display only and
+  never does arithmetic on them.
+- P&L is computed when a trade is closed or edited, then stored. Reads and stats use the
+  stored values.
+
+## Stats (`GET /api/stats`)
+
+Computed over **CLOSED** trades only, using `decimal.js`, returned as strings:
+
+- total net P&L, total gross P&L, total fees
+- number of closed trades, number of open trades
+- wins (`netPnl > 0`), losses (`netPnl < 0`), break-evens (`netPnl = 0`)
+- win rate = wins ÷ closed trades
+- average win, average loss (USD)
+
+## API (v0.1)
+
+```
+GET    /api/instruments
+GET    /api/trades          newest first
+POST   /api/trades
+GET    /api/trades/:id
+PUT    /api/trades/:id
+DELETE /api/trades/:id
+GET    /api/stats
+```
