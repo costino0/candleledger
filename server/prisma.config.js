@@ -7,6 +7,8 @@ export default defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
+    // Run by `prisma db seed`. Prisma 7 no longer runs it automatically after migrations.
+    seed: 'node prisma/seed.js',
   },
   datasource: {
     // Read directly (not via Prisma's env() helper) so commands that don't need a

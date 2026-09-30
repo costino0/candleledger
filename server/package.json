@@ -10,6 +10,10 @@
     "test:watch": "vitest",
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:status": "prisma migrate status",
+    "db:seed": "prisma db seed",
+    "db:verify": "node prisma/verify.js",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio"
   },
