@@ -796,3 +796,101 @@ describe('DELETE /api/trades/:id', () => {
     expect(prisma.trade.delete).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /api/stats', () => {
+  // A stand-in for the Prisma client with the one read getStats makes.
+  function fakeStatsPrisma(rows = []) {
+    return { trade: { findMany: vi.fn(async () => rows) } };
+  }
+
+  function statsRow(status, grossPnl, fees, netPnl) {
+    const toDecimal = (value) => (value === null ? null : new Decimal(value));
+    return {
+      status,
+      grossPnl: toDecimal(grossPnl),
+      netPnl: toDecimal(netPnl),
+      fees: toDecimal(fees),
+    };
+  }
+
+  it('returns every stat with integer counts and fixed-scale strings', async () => {
+    const prisma = fakeStatsPrisma([
+      statsRow('CLOSED', '41', '2.48', '38.52'),
+      statsRow('CLOSED', '102.5', '2.48', '100.02'),
+      statsRow('CLOSED', '-23.02', '2.48', '-25.5'),
+      statsRow('CLOSED', '0', '0', '0'),
+      statsRow('OPEN', null, '1.24', null),
+    ]);
+
+    const res = await request(createApp({ prisma })).get('/api/stats');
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.body).toEqual({
+      totalNetPnl: '113.04',
+      totalGrossPnl: '120.48',
+      totalFees: '7.44',
+      closedTrades: 4,
+      openTrades: 1,
+      wins: 2,
+      losses: 1,
+      breakEvens: 1,
+      winRate: '50.00',
+      averageWin: '69.27',
+      averageLoss: '-25.50',
+    });
+    expect(prisma.trade.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.trade.findMany).toHaveBeenCalledWith({
+      select: { status: true, grossPnl: true, netPnl: true, fees: true },
+    });
+  });
+
+  it('returns zero totals and null rates when there are no trades', async () => {
+    const res = await request(createApp({ prisma: fakeStatsPrisma() })).get('/api/stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      totalNetPnl: '0.00',
+      totalGrossPnl: '0.00',
+      totalFees: '0.00',
+      closedTrades: 0,
+      openTrades: 0,
+      wins: 0,
+      losses: 0,
+      breakEvens: 0,
+      winRate: null,
+      averageWin: null,
+      averageLoss: null,
+    });
+  });
+
+  it('returns 500 without leaking the message when the query fails', async () => {
+    silenceConsoleError();
+    const prisma = fakeStatsPrisma();
+    prisma.trade.findMany.mockRejectedValue(new Error('connection lost'));
+
+    const res = await request(createApp({ prisma })).get('/api/stats');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+
+  it('returns 500 when a CLOSED trade is missing a stored value', async () => {
+    silenceConsoleError();
+    const prisma = fakeStatsPrisma([statsRow('CLOSED', '41', null, '38.52')]);
+
+    const res = await request(createApp({ prisma })).get('/api/stats');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+
+  it('returns the generic 404 for POST /api/stats', async () => {
+    const prisma = fakeStatsPrisma();
+    const res = await request(createApp({ prisma })).post('/api/stats');
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(prisma.trade.findMany).not.toHaveBeenCalled();
+  });
+});

@@ -1,6 +1,7 @@
 import express from 'express';
 import { NotFoundError, ValidationError } from './errors.js';
 import { createInstrumentsRouter } from './routes/instruments.js';
+import { createStatsRouter } from './routes/stats.js';
 import { createTradesRouter } from './routes/trades.js';
 
 // Builds and returns the Express app without starting it.
@@ -21,6 +22,7 @@ export function createApp({ prisma } = {}) {
 
   app.use('/api/instruments', createInstrumentsRouter(prisma));
   app.use('/api/trades', createTradesRouter(prisma));
+  app.use('/api/stats', createStatsRouter(prisma));
 
   // Any /api route not matched above.
   app.use('/api', (req, res) => {
