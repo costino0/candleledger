@@ -59,3 +59,8 @@ export function outcomeClass(value) {
   if (/^-?0+(\.0+)?$/.test(value)) return 'outcome-zero';
   return value.startsWith('-') ? 'outcome-negative' : 'outcome-positive';
 }
+
+/** Names a trade for buttons and prompts: "NQ LONG Sep 30, 2026, 4:00 PM". */
+export function tradeLabel(trade, symbol) {
+  return `${symbol} ${trade.direction} ${formatDateTime(trade.enteredAt)}`;
+}

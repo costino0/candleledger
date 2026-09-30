@@ -1,8 +1,16 @@
-import { EMPTY, formatDateTime, formatDecimal, formatMoney, outcomeClass } from '../format.js';
+import {
+  EMPTY,
+  formatDateTime,
+  formatDecimal,
+  formatMoney,
+  outcomeClass,
+  tradeLabel,
+} from '../format.js';
 
 // Lists trades in the order the server sent them (newest first), each with an Edit button
-// that calls `onEdit(trade)`. `editDisabled` turns those buttons off.
-export default function TradesTable({ trades, instruments, onEdit, editDisabled }) {
+// that calls `onEdit(trade)` and a Delete button that calls `onDelete(trade)`.
+// `actionsDisabled` turns all of those buttons off.
+export default function TradesTable({ trades, instruments, onEdit, onDelete, actionsDisabled }) {
   return (
     <section className="panel" aria-labelledby="trades-heading">
       <h2 id="trades-heading">Trades</h2>
@@ -16,14 +24,15 @@ export default function TradesTable({ trades, instruments, onEdit, editDisabled 
           trades={trades}
           instruments={instruments}
           onEdit={onEdit}
-          editDisabled={editDisabled}
+          onDelete={onDelete}
+          actionsDisabled={actionsDisabled}
         />
       )}
     </section>
   );
 }
 
-function TradeRows({ trades, instruments, onEdit, editDisabled }) {
+function TradeRows({ trades, instruments, onEdit, onDelete, actionsDisabled }) {
   // Symbols come from the instruments response, so the client keeps no copy of them.
   const symbols = new Map(instruments.map((instrument) => [instrument.id, instrument.symbol]));
 
@@ -63,6 +72,7 @@ function TradeRows({ trades, instruments, onEdit, editDisabled }) {
         <tbody>
           {trades.map((trade) => {
             const symbol = symbols.get(trade.instrumentId) ?? `#${trade.instrumentId}`;
+            const label = tradeLabel(trade, symbol);
             return (
               <tr key={trade.id}>
                 <td>
@@ -87,11 +97,20 @@ function TradeRows({ trades, instruments, onEdit, editDisabled }) {
                 <td className="actions">
                   <button
                     type="button"
-                    aria-label={`Edit ${symbol} ${trade.direction} ${formatDateTime(trade.enteredAt)}`}
-                    disabled={editDisabled}
+                    aria-label={`Edit ${label}`}
+                    disabled={actionsDisabled}
                     onClick={() => onEdit(trade)}
                   >
                     Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="button-danger"
+                    aria-label={`Delete ${label}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onDelete(trade)}
+                  >
+                    Delete
                   </button>
                 </td>
               </tr>

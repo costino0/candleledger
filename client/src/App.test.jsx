@@ -226,7 +226,7 @@ describe('App', () => {
       '-5.75',
       '$2.50',
       '-$25.50',
-      'Edit',
+      'EditDelete',
     ]);
     expect(rowCells(3)[1]).toBe('ES');
   });
@@ -248,7 +248,7 @@ describe('App', () => {
       '—',
       '$1.24',
       '—',
-      'Edit',
+      'EditDelete',
     ]);
   });
 
@@ -720,12 +720,12 @@ describe('Edit trade', () => {
     expect(screen.getByLabelText('Exited at').getAttribute('step')).toBe('1');
   });
 
-  it('disables every Edit button and hides Add trade while a form is open', async () => {
+  it('disables every Edit and Delete button and hides Add trade while a form is open', async () => {
     stubEditApi();
     render(<App />);
     await openEdit(/^Edit MNQ SHORT/);
 
-    for (const button of screen.getAllByRole('button', { name: /^Edit / })) {
+    for (const button of screen.getAllByRole('button', { name: /^(Edit|Delete) / })) {
       expect(button.matches(':disabled')).toBe(true);
     }
     expect(screen.queryByRole('button', { name: 'Add trade' })).toBeNull();
@@ -1004,3 +1004,258 @@ async function waitForReload(fetchMock) {
   expect(getCount(fetchMock)).toBe(6);
   await screen.findByRole('table');
 }
+
+// Every DELETE request the mock received, as [path, init] pairs.
+function deleteRequests(fetchMock) {
+  return fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE');
+}
+
+async function openDelete(name) {
+  await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name }));
+  return screen.getByRole('region', { name: 'Delete trade' });
+}
+
+function confirmDelete() {
+  fireEvent.click(screen.getByRole('button', { name: 'Delete trade' }));
+}
+
+// Stats the server reports once LOSING_TRADE is gone.
+const STATS_AFTER_DELETE = {
+  ...STATS,
+  totalNetPnl: '97.52',
+  closedTrades: 1,
+  losses: 0,
+  winRate: '100.00',
+  averageLoss: null,
+};
+
+function stubDeleteApi(overrides = {}) {
+  let deleted = false;
+  return stubApi({
+    'DELETE /api/trades/2': () => {
+      deleted = true;
+      return new Response(null, { status: 204 });
+    },
+    '/api/trades': () =>
+      jsonResponse(
+        deleted ? [OPEN_TRADE, WINNING_TRADE] : [OPEN_TRADE, LOSING_TRADE, WINNING_TRADE],
+      ),
+    '/api/stats': () => jsonResponse(deleted ? STATS_AFTER_DELETE : STATS),
+    ...overrides,
+  });
+}
+
+describe('Delete trade', () => {
+  it('has a Delete button for every trade', async () => {
+    stubDeleteApi();
+    render(<App />);
+    await screen.findByRole('table');
+
+    expect(screen.getAllByRole('button', { name: /^Delete / })).toHaveLength(3);
+    expect(
+      screen.getByRole('button', { name: /^Delete NQ LONG Sep 30, 2026, 4:00\sPM$/ }),
+    ).toBeTruthy();
+  });
+
+  it('asks for confirmation without sending anything', async () => {
+    const fetchMock = stubDeleteApi();
+    render(<App />);
+    const panel = await openDelete(/^Delete MNQ SHORT/);
+
+    expect(panel.textContent).toMatch(
+      /Delete the MNQ SHORT Sep 30, 2026, 2:30\sPM trade\? This cannot be undone\./,
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+    expect(deleteRequests(fetchMock)).toHaveLength(0);
+
+    const table = screen.getByRole('table');
+    for (const button of within(table).getAllByRole('button')) {
+      expect(button.matches(':disabled')).toBe(true);
+    }
+    expect(screen.queryByRole('button', { name: 'Add trade' })).toBeNull();
+  });
+
+  it('closes the confirmation on Cancel without sending anything', async () => {
+    const fetchMock = stubDeleteApi();
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('region', { name: 'Delete trade' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add trade' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Delete MNQ SHORT/ }).matches(':disabled')).toBe(
+      false,
+    );
+    expect(deleteRequests(fetchMock)).toHaveLength(0);
+    expect(getCount(fetchMock)).toBe(3);
+  });
+
+  it('deletes the trade, then reloads trades and stats from the server', async () => {
+    const fetchMock = stubDeleteApi();
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    expect(await screen.findByText('Trade deleted.')).toBeTruthy();
+    expect(deleteRequests(fetchMock)).toEqual([['/api/trades/2', { method: 'DELETE' }]]);
+    expect(screen.queryByRole('region', { name: 'Delete trade' })).toBeNull();
+
+    // Everything shown now comes from the second load.
+    await waitForReload(fetchMock);
+    expect(screen.getAllByRole('button', { name: /^Delete / })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /^Delete MNQ SHORT/ })).toBeNull();
+    expect(statValue('Net P&L').textContent).toBe('$97.52');
+    expect(statValue('Win rate').textContent).toBe('100.00%');
+  });
+
+  it('shows the empty state after deleting the last trade', async () => {
+    let deleted = false;
+    const fetchMock = stubApi({
+      'DELETE /api/trades/2': () => {
+        deleted = true;
+        return new Response(null, { status: 204 });
+      },
+      '/api/trades': () => jsonResponse(deleted ? [] : [LOSING_TRADE]),
+      '/api/stats': () => jsonResponse(deleted ? EMPTY_STATS : STATS),
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    expect(await screen.findByText('No trades yet.')).toBeTruthy();
+    expect(getCount(fetchMock)).toBe(6);
+    expect(statValue('Net P&L').textContent).toBe('$0.00');
+  });
+
+  it('disables the confirmation while the request is in flight', async () => {
+    let respond;
+    const fetchMock = stubDeleteApi({
+      'DELETE /api/trades/2': () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    const deleting = screen.getByRole('button', { name: 'Deleting…' });
+    expect(deleting.matches(':disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Cancel' }).matches(':disabled')).toBe(true);
+
+    fireEvent.click(deleting);
+    expect(deleteRequests(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      respond(jsonResponse({ error: 'Internal server error' }, 500));
+    });
+    expect(screen.getByRole('button', { name: 'Delete trade' }).matches(':disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Cancel' }).matches(':disabled')).toBe(false);
+  });
+
+  it('keeps Edit and Delete disabled until the reloaded trades arrive', async () => {
+    let tradesCalls = 0;
+    let releaseTrades;
+    stubDeleteApi({
+      '/api/trades': () => {
+        tradesCalls += 1;
+        if (tradesCalls === 1) return jsonResponse([OPEN_TRADE, LOSING_TRADE]);
+        return new Promise((resolve) => {
+          releaseTrades = () => resolve(jsonResponse([OPEN_TRADE]));
+        });
+      },
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+    await screen.findByText('Trade deleted.');
+
+    // The table still shows the trade from before the delete.
+    expect(screen.getByRole('button', { name: /^Delete MNQ SHORT/ }).matches(':disabled')).toBe(
+      true,
+    );
+    expect(editButton(/^Edit NQ LONG/).matches(':disabled')).toBe(true);
+
+    await act(async () => {
+      releaseTrades();
+    });
+    expect(screen.queryByRole('button', { name: /^Delete MNQ SHORT/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Delete NQ LONG/ }).matches(':disabled')).toBe(
+      false,
+    );
+  });
+
+  it('closes the confirmation and reloads when the trade is already gone', async () => {
+    const fetchMock = stubDeleteApi({
+      'DELETE /api/trades/2': () => jsonResponse({ error: 'Trade not found' }, 404),
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    expect(
+      await screen.findByText(
+        'That trade had already been deleted. The journal has been reloaded.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Delete trade' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    await waitForReload(fetchMock);
+  });
+
+  it('treats any other 404 as a failed delete', async () => {
+    const fetchMock = stubDeleteApi({
+      'DELETE /api/trades/2': () => jsonResponse({ error: 'Not found' }, 404),
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not delete the trade. Not found (HTTP 404)');
+    expect(screen.getByRole('region', { name: 'Delete trade' })).toBeTruthy();
+    expect(getCount(fetchMock)).toBe(3);
+  });
+
+  it('shows the error, keeps the confirmation open and does not reload on a server error', async () => {
+    const fetchMock = stubDeleteApi({
+      'DELETE /api/trades/2': () => jsonResponse({ error: 'Internal server error' }, 500),
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not delete the trade. Internal server error (HTTP 500)');
+    expect(screen.getByRole('region', { name: 'Delete trade' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete trade' }).matches(':disabled')).toBe(false);
+    expect(getCount(fetchMock)).toBe(3);
+    expect(screen.getByRole('button', { name: /^Delete MNQ SHORT/ })).toBeTruthy();
+  });
+
+  it('shows a readable error when the server cannot be reached', async () => {
+    const fetchMock = stubDeleteApi({
+      'DELETE /api/trades/2': () => {
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    render(<App />);
+    await openDelete(/^Delete MNQ SHORT/);
+
+    confirmDelete();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not delete the trade. Could not reach the server.');
+    expect(screen.getByRole('button', { name: 'Cancel' }).matches(':disabled')).toBe(false);
+    expect(getCount(fetchMock)).toBe(3);
+  });
+});
