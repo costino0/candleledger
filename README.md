@@ -11,13 +11,13 @@ with decimal arithmetic, using each contract's dollar value per point.
 
 ## Tech stack
 
-| Layer    | Tools                            |
-| -------- | -------------------------------- |
-| Frontend | React, Vite                      |
-| Backend  | Node.js, Express                 |
-| Database | PostgreSQL, Prisma               |
-| Testing  | Vitest, Supertest                |
-| Tooling  | ESLint, Prettier, npm workspaces |
+| Layer    | Tools                                    |
+| -------- | ---------------------------------------- |
+| Frontend | React, Vite                              |
+| Backend  | Node.js, Express                         |
+| Database | PostgreSQL, Prisma                       |
+| Testing  | Vitest, Supertest, React Testing Library |
+| Tooling  | ESLint, Prettier, npm workspaces         |
 
 ## Project structure
 
