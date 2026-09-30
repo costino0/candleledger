@@ -146,8 +146,8 @@ Computed over **CLOSED** trades only, using `decimal.js`, returned as strings:
 ## API (v0.1)
 
 ```
-GET    /api/instruments
-GET    /api/trades          newest first
+GET    /api/instruments     ordered by id (NQ, MNQ, ES, MES)
+GET    /api/trades          newest first: enteredAt descending, then id descending
 POST   /api/trades
 GET    /api/trades/:id
 PUT    /api/trades/:id
@@ -160,6 +160,13 @@ GET    /api/stats
 - **Trade bodies** list every Trade column (no relations). Decimal fields are strings with
   exactly two decimal places (`"18000.00"`, `"0.00"`); timestamps are ISO 8601 strings in
   UTC (`"2026-09-30T14:30:00.000Z"`); unset optional fields are `null`, never omitted.
+- **Instrument bodies** list `id`, `symbol`, `name`, `pointValue` and `tickSize`. Decimal
+  fields are strings with their column's scale: `pointValue` has two decimal places
+  (`"20.00"`) and `tickSize` has four (`"0.2500"`).
+- `GET /api/instruments` and `GET /api/trades` return **200** with a JSON array (`[]` when
+  empty). v0.1 has no pagination.
+- `GET /api/trades/:id` returns **200** with the trade. `:id` must be canonical digits from
+  1 to 2147483647 (no sign, leading zero, decimal point, exponent or whitespace).
 - `POST /api/trades` returns **201** with the created trade.
 - **400 validation error**: the payload broke a rule above. Each issue gives the field path
   (`[]` for the payload as a whole) and a message:
@@ -171,7 +178,19 @@ GET    /api/stats
   }
   ```
 
+- **400 invalid id**: a malformed `:id` is a validation error at path `["id"]`:
+
+  ```json
+  {
+    "error": "Validation failed",
+    "issues": [
+      { "path": ["id"], "message": "must be a positive integer no greater than 2147483647" }
+    ]
+  }
+  ```
+
 - **400 malformed JSON**: `{ "error": "Malformed JSON body" }`.
+- **404 missing trade**: a valid id with no trade returns `{ "error": "Trade not found" }`.
 - **404**: any unknown `/api` route returns `{ "error": "Not found" }`.
 - **500**: any other failure, including database errors, returns
   `{ "error": "Internal server error" }`. Details are logged on the server, never sent.

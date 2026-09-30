@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTradeSchema } from './trade.js';
+import { createTradeSchema, tradeIdSchema } from './trade.js';
 
 function openTrade(overrides = {}) {
   return {
@@ -269,5 +269,44 @@ describe('createTradeSchema', () => {
     it('does not add a time-order issue when enteredAt itself is invalid', () => {
       expect(issuePaths(closedTrade({ enteredAt: 'not a date' }))).toEqual(['enteredAt']);
     });
+  });
+});
+
+describe('tradeIdSchema', () => {
+  it.each([
+    ['1', 1],
+    ['42', 42],
+    ['2147483647', 2147483647],
+  ])('accepts %s', (raw, expected) => {
+    expect(tradeIdSchema.parse(raw)).toBe(expected);
+  });
+
+  it.each([
+    '',
+    '0',
+    '-1',
+    '+1',
+    '01',
+    '1.0',
+    '1.5',
+    '1e3',
+    '0x10',
+    'abc',
+    '1abc',
+    ' 1',
+    '1 ',
+    '2147483648',
+    '99999999999',
+  ])('rejects %j', (raw) => {
+    const result = tradeIdSchema.safeParse(raw);
+
+    expect(result.success).toBe(false);
+    expect(result.error.issues.map((issue) => issue.message)).toEqual([
+      'must be a positive integer no greater than 2147483647',
+    ]);
+  });
+
+  it.each([1, null, undefined])('rejects the non-string %j', (raw) => {
+    expect(tradeIdSchema.safeParse(raw).success).toBe(false);
   });
 });

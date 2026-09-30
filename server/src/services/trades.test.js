@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import { describe, expect, it, vi } from 'vitest';
-import { ValidationError } from '../errors.js';
-import { createTrade } from './trades.js';
+import { NotFoundError, ValidationError } from '../errors.js';
+import { createTrade, getTrade, listTrades } from './trades.js';
 
 // Instrument rows as Prisma would return them. decimal.js Decimals stand in for the
 // decimal-like values Prisma returns; the service only calls `toFixed()` on them.
@@ -391,5 +391,65 @@ describe('createTrade', () => {
 
       expect(input).toEqual(copy);
     });
+  });
+});
+
+describe('listTrades', () => {
+  it('returns every trade, newest entry first, then highest id first', async () => {
+    const rows = [{ id: 2 }, { id: 1 }];
+    const prisma = { trade: { findMany: vi.fn(async () => rows) } };
+
+    await expect(listTrades(prisma)).resolves.toBe(rows);
+    expect(prisma.trade.findMany).toHaveBeenCalledWith({
+      orderBy: [{ enteredAt: 'desc' }, { id: 'desc' }],
+    });
+  });
+
+  it('returns an empty array when there are no trades', async () => {
+    const prisma = { trade: { findMany: vi.fn(async () => []) } };
+
+    await expect(listTrades(prisma)).resolves.toEqual([]);
+  });
+});
+
+describe('getTrade', () => {
+  function prismaWith(row) {
+    return { trade: { findUnique: vi.fn(async () => row) } };
+  }
+
+  it('looks the trade up by its numeric id and returns the row', async () => {
+    const row = { id: 7 };
+    const prisma = prismaWith(row);
+
+    await expect(getTrade(prisma, '7')).resolves.toBe(row);
+    expect(prisma.trade.findUnique).toHaveBeenCalledWith({ where: { id: 7 } });
+  });
+
+  it('throws NotFoundError with a fixed message when no trade has the id', async () => {
+    const error = await getTrade(prismaWith(null), '7').catch((e) => e);
+
+    expect(error).toBeInstanceOf(NotFoundError);
+    expect(error.message).toBe('Trade not found');
+  });
+
+  it.each(['abc', '0', '-1', '1.5', '2147483648'])(
+    'throws ValidationError at path ["id"] for %j without querying',
+    async (raw) => {
+      const prisma = prismaWith({ id: 1 });
+      const error = await getTrade(prisma, raw).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues).toEqual([
+        { path: ['id'], message: 'must be a positive integer no greater than 2147483647' },
+      ]);
+      expect(prisma.trade.findUnique).not.toHaveBeenCalled();
+    },
+  );
+
+  it('passes errors from prisma.trade.findUnique through unchanged', async () => {
+    const dbError = new Error('connection lost');
+    const prisma = { trade: { findUnique: vi.fn().mockRejectedValue(dbError) } };
+
+    await expect(getTrade(prisma, '1')).rejects.toBe(dbError);
   });
 });

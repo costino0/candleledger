@@ -1,8 +1,8 @@
-// Trade creation domain logic. No Express: routes will call this later.
+// Trade domain logic. No Express: routes/trades.js calls these.
 // See docs/DATA_MODEL.md for the rules enforced here.
 import Decimal from 'decimal.js';
-import { ValidationError } from '../errors.js';
-import { createTradeSchema } from '../schemas/trade.js';
+import { NotFoundError, ValidationError } from '../errors.js';
+import { createTradeSchema, tradeIdSchema } from '../schemas/trade.js';
 import { calculateClosedTradePnl } from './pnl.js';
 import { isMultipleOfTickSize } from './tickSize.js';
 
@@ -104,6 +104,41 @@ export async function createTrade(prisma, input) {
   }
 
   return prisma.trade.create({ data });
+}
+
+/**
+ * Lists every trade, newest first. Trades entered at the same instant are ordered by id,
+ * newest first, so the order is always the same.
+ *
+ * @param {import('@prisma/client').PrismaClient} prisma
+ * @returns {Promise<import('@prisma/client').Trade[]>} the rows, as Prisma returns them
+ */
+export function listTrades(prisma) {
+  return prisma.trade.findMany({ orderBy: [{ enteredAt: 'desc' }, { id: 'desc' }] });
+}
+
+/**
+ * Finds one trade by the id from the URL.
+ *
+ * @param {import('@prisma/client').PrismaClient} prisma
+ * @param {unknown} rawId  untrusted id, e.g. the `:id` route param string
+ * @returns {Promise<import('@prisma/client').Trade>} the row, as Prisma returns it
+ * @throws {ValidationError} when the id is not a positive integer in the column's range
+ * @throws {NotFoundError} when no trade has that id
+ */
+export async function getTrade(prisma, rawId) {
+  const parsed = tradeIdSchema.safeParse(rawId);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map((issue) => ({ path: ['id'], message: issue.message })),
+    );
+  }
+
+  const trade = await prisma.trade.findUnique({ where: { id: parsed.data } });
+  if (!trade) {
+    throw new NotFoundError('Trade not found');
+  }
+  return trade;
 }
 
 // Prisma returns Decimal columns as decimal-like objects. `toFixed()` with no argument

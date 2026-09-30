@@ -1,4 +1,5 @@
-// Zod schema for the payload that creates a trade. See docs/DATA_MODEL.md#input-validation.
+// Zod schemas for trade input: the payload that creates a trade, and the `:id` route param.
+// See docs/DATA_MODEL.md#input-validation.
 //
 // Prices and fees stay strings (they are never converted to JavaScript numbers), and
 // timestamps become Date objects. Checks that need the database, such as whether the
@@ -97,3 +98,15 @@ const tradeFields = z
   });
 
 export const createTradeSchema = z.preprocess(omitServerOwnedFields, tradeFields);
+
+// A trade id from a URL path segment: canonical decimal digits only (no sign, leading zero,
+// decimal point, exponent or whitespace), 1 to INT4_MAX. The regex caps the length before
+// Number(), so the conversion is exact.
+const TRADE_ID = /^[1-9]\d{0,9}$/;
+const TRADE_ID_MESSAGE = `must be a positive integer no greater than ${INT4_MAX}`;
+
+export const tradeIdSchema = z
+  .string({ error: TRADE_ID_MESSAGE })
+  .regex(TRADE_ID, TRADE_ID_MESSAGE)
+  .transform(Number)
+  .refine((id) => id <= INT4_MAX, TRADE_ID_MESSAGE);

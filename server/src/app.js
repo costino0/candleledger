@@ -1,5 +1,6 @@
 import express from 'express';
-import { ValidationError } from './errors.js';
+import { NotFoundError, ValidationError } from './errors.js';
+import { createInstrumentsRouter } from './routes/instruments.js';
 import { createTradesRouter } from './routes/trades.js';
 
 // Builds and returns the Express app without starting it.
@@ -18,6 +19,7 @@ export function createApp({ prisma } = {}) {
     res.json({ status: 'ok' });
   });
 
+  app.use('/api/instruments', createInstrumentsRouter(prisma));
   app.use('/api/trades', createTradesRouter(prisma));
 
   // Any /api route not matched above.
@@ -38,6 +40,11 @@ function handleError(err, req, res, next) {
 
   if (err instanceof ValidationError) {
     return res.status(400).json({ error: 'Validation failed', issues: err.issues });
+  }
+
+  // Only server code throws NotFoundError, always with a fixed client-safe message.
+  if (err instanceof NotFoundError) {
+    return res.status(404).json({ error: err.message });
   }
 
   // Errors from express.json(). `expose` marks messages that are safe to show clients.

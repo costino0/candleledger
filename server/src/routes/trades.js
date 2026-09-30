@@ -2,10 +2,20 @@
 // reach the error handler in app.js (Express 5 forwards rejected promises).
 import { Router } from 'express';
 import { serializeTrade } from '../serializers/trade.js';
-import { createTrade } from '../services/trades.js';
+import { createTrade, getTrade, listTrades } from '../services/trades.js';
 
 export function createTradesRouter(prisma) {
   const router = Router();
+
+  router.get('/', async (req, res) => {
+    const trades = await listTrades(prisma);
+    res.json(trades.map(serializeTrade));
+  });
+
+  router.get('/:id', async (req, res) => {
+    const trade = await getTrade(prisma, req.params.id);
+    res.json(serializeTrade(trade));
+  });
 
   router.post('/', async (req, res) => {
     const trade = await createTrade(prisma, req.body);
