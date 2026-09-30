@@ -65,6 +65,8 @@ integrations, market data.
 ## v0.3: TypeScript migration
 
 - Migrate the server to TypeScript, then the client
+- Replace the temporary `prisma-client-js` generator with the modern `prisma-client`
+  generator (see [Dependency policy](../README.md#dependency-policy))
 - Shared types for the API contract
 - Done early, while the codebase is still small
 

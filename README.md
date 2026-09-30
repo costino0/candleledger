@@ -57,6 +57,16 @@ Run from the repository root:
 | `npm run format:check` | Check formatting without changing files |
 | `npm run build`        | Build the client for production         |
 
+## Dependency policy
+
+- **Prisma ORM is intentionally pinned to 7.x.** `prisma`, `@prisma/client` and
+  `@prisma/adapter-pg` use exact versions (currently `7.10.0`) and must be upgraded
+  together. Prisma 8 is a release candidate, and npm's `latest` tag already points to it,
+  so always install with an explicit version, for example `npm i -w server -E prisma@7.x.y`.
+- **The `prisma-client-js` generator is temporary.** It produces plain JavaScript for the
+  JavaScript phase. It will be replaced with the modern `prisma-client` generator during
+  the TypeScript migration in v0.3.
+
 ## Documentation
 
 - [Roadmap](docs/ROADMAP.md)

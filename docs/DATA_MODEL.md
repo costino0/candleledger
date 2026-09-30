@@ -60,7 +60,8 @@ they are ignored.
 
 - **Closing** a trade: `PUT` with `status: "CLOSED"` plus `exitPrice` and `exitedAt`.
 - **Reopening** a trade: `PUT` with `status: "OPEN"`. The server clears the exit fields and P&L.
-- **Editing a CLOSED trade** always makes the server recalculate and overwrite its P&L.
+- **Editing a CLOSED trade** always makes the server recalculate and overwrite its P&L,
+  including when its instrument changes (see [Point value snapshot](#point-value-snapshot)).
 
 ## Point value snapshot
 
@@ -68,8 +69,16 @@ they are ignored.
   into `pointValueSnapshot`.
 - All P&L for that trade uses `pointValueSnapshot`, never the live Instrument row.
 - Changing the Instrument table afterwards does **not** change existing trades.
-- If an edit changes the trade's `instrumentId`, the server re-snapshots from the newly
-  selected Instrument. This is the only time the snapshot changes.
+- The snapshot changes only when an edit changes the trade's own `instrumentId`:
+
+| Trade status when edited | What the server does in that same operation                                                                                                  |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| OPEN                     | Replaces `pointValueSnapshot` with the new Instrument's `pointValue`. P&L fields stay null.                                                  |
+| CLOSED                   | Replaces `pointValueSnapshot` with the new Instrument's `pointValue`, then recalculates and overwrites `pnlPoints`, `grossPnl` and `netPnl`. |
+
+For a CLOSED trade, the new snapshot and the recalculated P&L are saved in a single
+database write, so a trade is never stored with a snapshot that doesn't match its P&L.
+Prices are checked against the **new** instrument's tick size.
 
 ## P&L calculation
 

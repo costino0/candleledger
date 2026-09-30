@@ -1,7 +1,9 @@
 // CandleLedger v0.1 database schema.
 // See docs/DATA_MODEL.md for the rules the server enforces on top of this schema.
 
-// `prisma-client-js` generates plain JavaScript into node_modules/@prisma/client.
+// TEMPORARY: `prisma-client-js` generates plain JavaScript into node_modules/@prisma/client,
+// which suits the JavaScript phase. Replace it with the modern `prisma-client` generator
+// (which emits TypeScript) during the v0.3 TypeScript migration. See docs/ROADMAP.md.
 generator client {
   provider = "prisma-client-js"
 }
