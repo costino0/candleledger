@@ -712,3 +712,87 @@ describe('PUT /api/trades/:id', () => {
     expect(res.body).toEqual({ error: 'Not found' });
   });
 });
+
+describe('DELETE /api/trades/:id', () => {
+  // A stand-in for the Prisma client with only the call deleteTrade makes.
+  function fakeDeletePrisma() {
+    return { trade: { delete: vi.fn(async ({ where }) => tradeRow({ id: where.id })) } };
+  }
+
+  function prismaKnownError(code, message) {
+    return Object.assign(new Error(message), { name: 'PrismaClientKnownRequestError', code });
+  }
+
+  it('deletes the trade and returns 204 with no body', async () => {
+    const prisma = fakeDeletePrisma();
+    const res = await request(createApp({ prisma })).delete('/api/trades/7');
+
+    expect(res.status).toBe(204);
+    expect(res.text).toBe('');
+    expect(res.headers['content-type']).toBeUndefined();
+    expect(prisma.trade.delete).toHaveBeenCalledTimes(1);
+    expect(prisma.trade.delete).toHaveBeenCalledWith({ where: { id: 7 } });
+  });
+
+  it('returns a JSON 404 when no trade has the id', async () => {
+    const prisma = fakeDeletePrisma();
+    prisma.trade.delete.mockRejectedValue(prismaKnownError('P2025', 'record not found'));
+
+    const res = await request(createApp({ prisma })).delete('/api/trades/999');
+
+    expect(res.status).toBe(404);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.body).toEqual({ error: 'Trade not found' });
+  });
+
+  it.each(['abc', '0', '-1', '01', '1.5', '1e3', '%201', '2147483648'])(
+    'returns a 400 validation error for the id %j without deleting',
+    async (id) => {
+      const prisma = fakeDeletePrisma();
+      const res = await request(createApp({ prisma })).delete(`/api/trades/${id}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Validation failed',
+        issues: [
+          { path: ['id'], message: 'must be a positive integer no greater than 2147483647' },
+        ],
+      });
+      expect(prisma.trade.delete).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns 500 without leaking the message for an unrelated database error', async () => {
+    silenceConsoleError();
+    const prisma = fakeDeletePrisma();
+    prisma.trade.delete.mockRejectedValue(new Error('connection lost'));
+
+    const res = await request(createApp({ prisma })).delete('/api/trades/7');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+    expect(JSON.stringify(res.body)).not.toContain('connection lost');
+  });
+
+  it('returns 500, not 404, for a P2025 code on an error that is not from Prisma', async () => {
+    silenceConsoleError();
+    const prisma = fakeDeletePrisma();
+    prisma.trade.delete.mockRejectedValue(
+      Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }),
+    );
+
+    const res = await request(createApp({ prisma })).delete('/api/trades/7');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+
+  it('returns the generic 404 for DELETE /api/trades without an id', async () => {
+    const prisma = fakeDeletePrisma();
+    const res = await request(createApp({ prisma })).delete('/api/trades');
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(prisma.trade.delete).not.toHaveBeenCalled();
+  });
+});

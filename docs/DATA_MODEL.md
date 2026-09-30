@@ -182,6 +182,7 @@ GET    /api/stats
 - `POST /api/trades` returns **201** with the created trade.
 - `PUT /api/trades/:id` returns **200** with the updated trade. The target is checked
   before the body, so a missing trade is a 404 whatever was sent.
+- `DELETE /api/trades/:id` returns **204** with no body. The same `:id` rules apply.
 - **400 validation error**: the payload broke a rule above. Each issue gives the field path
   (`[]` for the payload as a whole) and a message:
 
@@ -205,7 +206,8 @@ GET    /api/stats
 
 - **400 malformed JSON**: `{ "error": "Malformed JSON body" }`.
 - **404 missing trade**: a valid id with no trade returns `{ "error": "Trade not found" }`.
-  This includes a trade that disappears between a `PUT`'s lookup and its update.
+  This includes a trade that disappears between a `PUT`'s lookup and its update, and a
+  trade that is already gone when a `DELETE` runs.
 - **404**: any unknown `/api` route returns `{ "error": "Not found" }`.
 - **500**: any other failure, including database errors, returns
   `{ "error": "Internal server error" }`. Details are logged on the server, never sent.

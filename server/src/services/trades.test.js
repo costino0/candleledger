@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import { describe, expect, it, vi } from 'vitest';
 import { NotFoundError, ValidationError } from '../errors.js';
-import { createTrade, getTrade, listTrades, updateTrade } from './trades.js';
+import { createTrade, deleteTrade, getTrade, listTrades, updateTrade } from './trades.js';
 
 // Instrument rows as Prisma would return them. decimal.js Decimals stand in for the
 // decimal-like values Prisma returns; the service only calls `toFixed()` on them.
@@ -813,5 +813,67 @@ describe('updateTrade', () => {
 
       expect(input).toEqual(copy);
     });
+  });
+});
+
+describe('deleteTrade', () => {
+  // Only `delete` exists, so any other call (such as a lookup first) would throw.
+  function fakeDeletePrisma() {
+    return { trade: { delete: vi.fn(async ({ where }) => ({ id: where.id })) } };
+  }
+
+  function prismaKnownError(code, message) {
+    return Object.assign(new Error(message), { name: 'PrismaClientKnownRequestError', code });
+  }
+
+  it('deletes the trade by its numeric id with one delete and no lookup', async () => {
+    const prisma = fakeDeletePrisma();
+
+    await expect(deleteTrade(prisma, '7')).resolves.toBeUndefined();
+    expect(prisma.trade.delete).toHaveBeenCalledTimes(1);
+    expect(prisma.trade.delete).toHaveBeenCalledWith({ where: { id: 7 } });
+  });
+
+  it.each(['abc', '0', '-1', '1.5', '2147483648'])(
+    'throws ValidationError at path ["id"] for %j without deleting',
+    async (raw) => {
+      const prisma = fakeDeletePrisma();
+      const error = await deleteTrade(prisma, raw).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.issues).toEqual([
+        { path: ['id'], message: 'must be a positive integer no greater than 2147483647' },
+      ]);
+      expect(prisma.trade.delete).not.toHaveBeenCalled();
+    },
+  );
+
+  it('throws NotFoundError with a fixed message when no trade has the id', async () => {
+    const prisma = fakeDeletePrisma();
+    prisma.trade.delete.mockRejectedValue(
+      prismaKnownError(
+        'P2025',
+        'An operation failed because it depends on one or more records that were required but not found',
+      ),
+    );
+
+    const error = await deleteTrade(prisma, '7').catch((e) => e);
+
+    expect(error).toBeInstanceOf(NotFoundError);
+    expect(error.message).toBe('Trade not found');
+  });
+
+  it.each([
+    ['a plain error', new Error('connection lost')],
+    ['a different Prisma error code', prismaKnownError('P2003', 'Foreign key constraint')],
+    [
+      'a P2025 code on an error that is not from Prisma',
+      Object.assign(new Error('x'), { code: 'P2025' }),
+    ],
+  ])('passes %s from trade.delete through unchanged', async (_, dbError) => {
+    const prisma = fakeDeletePrisma();
+    prisma.trade.delete.mockRejectedValue(dbError);
+
+    await expect(deleteTrade(prisma, '7')).rejects.toBe(dbError);
   });
 });

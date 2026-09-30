@@ -123,6 +123,32 @@ export async function getTrade(prisma, rawId) {
   return trade;
 }
 
+/**
+ * Deletes one trade by the id from the URL.
+ *
+ * There is no lookup first: the delete itself reports a missing row.
+ *
+ * @param {import('@prisma/client').PrismaClient} prisma
+ * @param {unknown} rawId  untrusted id, e.g. the `:id` route param string
+ * @returns {Promise<void>}
+ * @throws {ValidationError} when the id is not a positive integer in the column's range
+ * @throws {NotFoundError} when no trade has that id
+ */
+export async function deleteTrade(prisma, rawId) {
+  const id = parseTradeId(rawId);
+
+  try {
+    await prisma.trade.delete({ where: { id } });
+  } catch (error) {
+    // Only a missing row becomes a 404; any other database error propagates (and becomes
+    // a 500).
+    if (isRecordNotFoundError(error)) {
+      throw new NotFoundError('Trade not found');
+    }
+    throw error;
+  }
+}
+
 // Validates the `:id` route param and returns it as a number.
 function parseTradeId(rawId) {
   const parsed = tradeIdSchema.safeParse(rawId);
@@ -225,8 +251,9 @@ function buildTradeData(trade, { pointValueSnapshot, tickSize }) {
   return data;
 }
 
-// Prisma's error when an update's target row does not exist (code P2025). Matched by name
-// and code, not `instanceof`, so this module does not import the generated client.
+// Prisma's error when an update's or delete's target row does not exist (code P2025).
+// Matched by name and code, not `instanceof`, so this module does not import the
+// generated client.
 function isRecordNotFoundError(error) {
   return error?.name === 'PrismaClientKnownRequestError' && error.code === 'P2025';
 }
