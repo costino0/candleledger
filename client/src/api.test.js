@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createTrade, fetchJson, loadDashboard } from './api.js';
+import { createTrade, fetchJson, loadDashboard, updateTrade } from './api.js';
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -129,6 +129,8 @@ describe('createTrade', () => {
 
     await expect(createTrade(payload)).rejects.toMatchObject({
       message: 'Validation failed (HTTP 400)',
+      status: 400,
+      serverError: 'Validation failed',
       issues,
     });
   });
@@ -159,5 +161,58 @@ describe('createTrade', () => {
     });
 
     await expect(createTrade(payload)).rejects.toThrow('Could not reach the server.');
+  });
+});
+
+describe('updateTrade', () => {
+  const payload = { instrumentId: 2, status: 'OPEN', fees: '0' };
+
+  it('PUTs the payload as JSON to the trade and resolves when it is saved', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ id: 7 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(updateTrade(7, payload)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/trades/7', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"instrumentId":2,"status":"OPEN","fees":"0"}',
+    });
+  });
+
+  it('rejects with the issues of a validation error', async () => {
+    const issues = [{ path: ['fees'], message: 'Invalid input: expected string' }];
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Validation failed', issues }, 400));
+
+    await expect(updateTrade(7, payload)).rejects.toMatchObject({
+      message: 'Validation failed (HTTP 400)',
+      issues,
+    });
+  });
+
+  it('rejects with the status and server error of a missing trade', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Trade not found' }, 404));
+
+    await expect(updateTrade(7, payload)).rejects.toMatchObject({
+      message: 'Trade not found (HTTP 404)',
+      status: 404,
+      serverError: 'Trade not found',
+    });
+  });
+
+  it('rejects without a server error for an error response that is not JSON', async () => {
+    vi.stubGlobal('fetch', async () => new Response('Bad Gateway', { status: 502 }));
+
+    const error = await updateTrade(7, payload).catch((caught) => caught);
+    expect(error.message).toBe('Request failed (HTTP 502)');
+    expect(error.status).toBe(502);
+    expect(error.serverError).toBeUndefined();
+  });
+
+  it('rejects with a readable message when the server cannot be reached', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(updateTrade(7, payload)).rejects.toThrow('Could not reach the server.');
   });
 });

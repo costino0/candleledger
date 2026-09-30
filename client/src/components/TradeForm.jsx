@@ -1,6 +1,13 @@
 import { useState } from 'react';
-import { createTrade } from '../api.js';
-import { TRADE_FIELDS, buildCreatePayload, initialTradeValues, splitIssues } from '../tradeForm.js';
+import { createTrade, updateTrade } from '../api.js';
+import {
+  TRADE_FIELDS,
+  buildCreatePayload,
+  buildUpdatePayload,
+  initialTradeValues,
+  splitIssues,
+  tradeToFormValues,
+} from '../tradeForm.js';
 
 const LABELS = {
   instrumentId: 'Instrument',
@@ -17,10 +24,23 @@ const LABELS = {
 
 const EXIT_FIELDS = ['exitPrice', 'exitedAt'];
 
-// Records a new trade. The server checks every rule and computes the P&L; this form only
-// collects the values, sends them and shows what the server said about them.
-export default function AddTradeForm({ instruments, onCreated, onCancel }) {
-  const [values, setValues] = useState(() => initialTradeValues());
+// Records a new trade, or edits `trade` when one is given. The server checks every rule and
+// computes the P&L; this form only collects the values, sends them and shows what the server
+// said about them.
+//
+// `onTradeMissing` is called instead of showing an error when the trade being edited no
+// longer exists, because saving it again can never succeed.
+export default function TradeForm({
+  instruments,
+  trade = null,
+  onSaved,
+  onCancel,
+  onTradeMissing,
+}) {
+  const editing = trade !== null;
+  const [values, setValues] = useState(() =>
+    editing ? tradeToFormValues(trade) : initialTradeValues(),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
   // Problems not tied to a visible field, and failures that aren't validation errors.
@@ -44,7 +64,9 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
     setGeneralErrors([]);
     setFailure(null);
 
-    const { payload, errors } = buildCreatePayload(values);
+    const { payload, errors } = editing
+      ? buildUpdatePayload(values, trade)
+      : buildCreatePayload(values);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       return;
@@ -53,8 +75,12 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
     setFieldErrors({});
     setSubmitting(true);
     try {
-      await createTrade(payload);
+      await (editing ? updateTrade(trade.id, payload) : createTrade(payload));
     } catch (error) {
+      if (editing && error.status === 404 && error.serverError === 'Trade not found') {
+        onTradeMissing();
+        return;
+      }
       if (error.issues) {
         const split = splitIssues(error.issues, visibleFields);
         setFieldErrors(split.fieldErrors);
@@ -65,7 +91,7 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
       setSubmitting(false);
       return;
     }
-    onCreated();
+    onSaved();
   }
 
   // The props that tie an input to its label and to its error message, if it has one.
@@ -85,9 +111,14 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
     return <FieldError field={field} messages={fieldErrors[field]} />;
   }
 
+  // A trade whose instrument isn't in the list keeps it as an option, so the select shows
+  // the value that will be sent.
+  const unknownInstrument =
+    editing && !instruments.some((instrument) => instrument.id === trade.instrumentId);
+
   return (
-    <section className="panel" aria-labelledby="add-trade-heading">
-      <h2 id="add-trade-heading">Add trade</h2>
+    <section className="panel" aria-labelledby="trade-form-heading">
+      <h2 id="trade-form-heading">{editing ? 'Edit trade' : 'Add trade'}</h2>
       <form className="trade-form" onSubmit={submit} noValidate>
         {(failure || generalErrors.length > 0) && (
           <div className="message message-error" role="alert">
@@ -115,6 +146,9 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
                   {instrument.symbol} — {instrument.name}
                 </option>
               ))}
+              {unknownInstrument && (
+                <option value={trade.instrumentId}>#{trade.instrumentId}</option>
+              )}
             </select>
             {error('instrumentId')}
           </div>
@@ -147,6 +181,11 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
               </label>
             ))}
             {error('status')}
+            {editing && trade.status === 'CLOSED' && !closed && (
+              <p className="field-hint">
+                Saving as OPEN clears the exit price, exit time and P&amp;L.
+              </p>
+            )}
           </fieldset>
 
           <div className="field">
@@ -163,7 +202,8 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
 
           <div className="field">
             <label htmlFor="trade-enteredAt">Entered at</label>
-            <input type="datetime-local" {...fieldProps('enteredAt')} />
+            {/* step="1" allows seconds, which an existing trade's time can have. */}
+            <input type="datetime-local" step="1" {...fieldProps('enteredAt')} />
             {error('enteredAt')}
           </div>
 
@@ -179,7 +219,7 @@ export default function AddTradeForm({ instruments, onCreated, onCancel }) {
 
               <div className="field">
                 <label htmlFor="trade-exitedAt">Exited at</label>
-                <input type="datetime-local" {...fieldProps('exitedAt')} />
+                <input type="datetime-local" step="1" {...fieldProps('exitedAt')} />
                 {error('exitedAt')}
               </div>
             </>

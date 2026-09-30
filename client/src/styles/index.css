@@ -30,6 +30,16 @@ body {
   margin: 0;
 }
 
+/* Text for screen readers only. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .app {
   max-width: 1100px;
   margin: 0 auto;
@@ -167,6 +177,10 @@ h2 {
   border-bottom: none;
 }
 
+.trades .actions {
+  text-align: right;
+}
+
 .trades .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -211,7 +225,8 @@ h2 {
 /* Buttons */
 
 .toolbar button,
-.trade-form button {
+.trade-form button,
+.trades .actions button {
   padding: 0.375rem 0.875rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -246,7 +261,11 @@ button:disabled {
   color: var(--positive);
 }
 
-/* Add trade form */
+.toolbar .notice-warning {
+  color: var(--negative);
+}
+
+/* Add / edit trade form */
 
 .trade-form {
   padding: 1rem;
@@ -321,6 +340,12 @@ button:disabled {
 .field-wide,
 .form-actions {
   grid-column: 1 / -1;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
 }
 
 .field-error {
