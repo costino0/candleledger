@@ -47,8 +47,33 @@ A tradable futures contract. The server seeds these four rows.
 | `createdAt`          | Timestamptz        | server |                                                   |
 | `updatedAt`          | Timestamptz        | server |                                                   |
 
-Fields marked **server** are never accepted from the client. If a request includes them,
-they are ignored.
+Fields marked **server** are never trusted from client input. If a request includes them,
+they are ignored and the server supplies its own values. Any other field not in this table
+is rejected (see [Input validation](#input-validation)).
+
+## Input validation
+
+Rules for the trade payload a client sends, checked by the server before anything is saved:
+
+| Field          | Rule                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| `instrumentId` | JSON integer, 1 to 2147483647 (Postgres `integer`); the instrument must exist            |
+| `direction`    | `"LONG"` or `"SHORT"`                                                                    |
+| `status`       | `"OPEN"` or `"CLOSED"`; optional, defaults to `"OPEN"`                                   |
+| `quantity`     | JSON integer, 1 to 2147483647                                                            |
+| `entryPrice`   | String, > 0, at most 10 integer digits and 2 decimal places, multiple of the tick size   |
+| `exitPrice`    | Same as `entryPrice`; null or omitted when OPEN                                          |
+| `enteredAt`    | ISO 8601 date-time string with `Z` or a UTC offset, e.g. `"2026-09-30T14:30:00-04:00"`   |
+| `exitedAt`     | Same as `enteredAt`; null or omitted when OPEN                                           |
+| `fees`         | String, >= 0, at most 8 integer digits and 2 decimal places; optional, defaults to `"0"` |
+| `notes`        | String of at most 10,000 characters; optional                                            |
+
+- Prices and fees sent as JSON numbers are rejected. Timestamps without `Z` or an offset are
+  rejected, because they don't identify a single instant.
+- The server-owned fields `id`, `pointValueSnapshot`, `pnlPoints`, `grossPnl`, `netPnl`,
+  `createdAt` and `updatedAt` are ignored. Any other unknown field (for example a typo such
+  as `instrumntId`) is rejected.
+- A CLOSED trade is also rejected if its computed P&L is too large for its column.
 
 ## Status rules
 
