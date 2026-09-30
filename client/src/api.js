@@ -1,4 +1,4 @@
-// Read-only calls to the CandleLedger API. Paths are relative, so in development the Vite
+// Calls to the CandleLedger API. Paths are relative, so in development the Vite
 // proxy forwards them to the Express server. Response bodies are returned as the server sent
 // them: Decimal values stay strings (see docs/DATA_MODEL.md#responses-and-errors).
 
@@ -22,7 +22,7 @@ export async function fetchJson(path, signal) {
   }
 
   if (!response.ok) {
-    throw new Error(await errorMessage(response));
+    throw new Error((await readError(response)).message);
   }
 
   try {
@@ -33,18 +33,22 @@ export async function fetchJson(path, signal) {
   }
 }
 
-// API errors are `{ "error": "..." }`. Anything else (for example the Vite proxy's reply
-// when the Express server is down) gets a generic message with the status code.
-async function errorMessage(response) {
+// API errors are `{ "error": "..." }`, plus `issues` for a validation error. Anything else
+// (for example the Vite proxy's reply when the Express server is down) gets a generic message
+// with the status code.
+async function readError(response) {
   try {
     const body = await response.json();
     if (typeof body?.error === 'string') {
-      return `${body.error} (HTTP ${response.status})`;
+      return {
+        message: `${body.error} (HTTP ${response.status})`,
+        issues: Array.isArray(body.issues) ? body.issues : undefined,
+      };
     }
   } catch {
     // Not JSON: fall through to the generic message.
   }
-  return `Request failed (HTTP ${response.status})`;
+  return { message: `Request failed (HTTP ${response.status})`, issues: undefined };
 }
 
 /**
@@ -60,4 +64,36 @@ export async function loadDashboard(signal) {
     fetchJson('/api/stats', signal),
   ]);
   return { instruments, trades, stats };
+}
+
+/**
+ * POSTs a new trade. Resolves once the server has created it; the response body isn't
+ * used, because the caller reloads the dashboard from the server anyway.
+ *
+ * Rejects with an Error with a readable message, like fetchJson. For a validation error the
+ * Error also has `issues`: the server's `[{ path, message }]` list.
+ *
+ * There is no abort signal on purpose: cancelling a write the server may already have saved
+ * would only hide the result.
+ *
+ * @param {object} payload  see docs/DATA_MODEL.md#input-validation
+ */
+export async function createTrade(payload) {
+  let response;
+  try {
+    response = await fetch('/api/trades', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    throw new Error('Could not reach the server.', { cause: error });
+  }
+
+  if (!response.ok) {
+    const { message, issues } = await readError(response);
+    const error = new Error(message);
+    if (issues) error.issues = issues;
+    throw error;
+  }
 }

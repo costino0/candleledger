@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJson, loadDashboard } from './api.js';
+import { createTrade, fetchJson, loadDashboard } from './api.js';
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -99,5 +99,65 @@ describe('loadDashboard', () => {
     );
 
     await expect(loadDashboard()).rejects.toThrow('Internal server error (HTTP 500)');
+  });
+});
+
+describe('createTrade', () => {
+  const payload = { instrumentId: 2, direction: 'LONG', entryPrice: '18000.25' };
+
+  it('POSTs the payload as JSON and resolves when the trade is created', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ id: 7 }, 201));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createTrade(payload)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/trades', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"instrumentId":2,"direction":"LONG","entryPrice":"18000.25"}',
+    });
+  });
+
+  it('resolves even if the created response body is not JSON', async () => {
+    vi.stubGlobal('fetch', async () => new Response('Created', { status: 201 }));
+
+    await expect(createTrade(payload)).resolves.toBeUndefined();
+  });
+
+  it('rejects with the issues of a validation error', async () => {
+    const issues = [{ path: ['entryPrice'], message: 'must be greater than 0' }];
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Validation failed', issues }, 400));
+
+    await expect(createTrade(payload)).rejects.toMatchObject({
+      message: 'Validation failed (HTTP 400)',
+      issues,
+    });
+  });
+
+  it('rejects without issues for a 400 that is not a validation error', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Malformed JSON body' }, 400));
+
+    const error = await createTrade(payload).catch((caught) => caught);
+    expect(error.message).toBe('Malformed JSON body (HTTP 400)');
+    expect(error.issues).toBeUndefined();
+  });
+
+  it("rejects with the server's message for a server error", async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ error: 'Internal server error' }, 500));
+
+    await expect(createTrade(payload)).rejects.toThrow('Internal server error (HTTP 500)');
+  });
+
+  it('rejects with a generic message for an error response that is not JSON', async () => {
+    vi.stubGlobal('fetch', async () => new Response('Bad Gateway', { status: 502 }));
+
+    await expect(createTrade(payload)).rejects.toThrow('Request failed (HTTP 502)');
+  });
+
+  it('rejects with a readable message when the server cannot be reached', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(createTrade(payload)).rejects.toThrow('Could not reach the server.');
   });
 });
