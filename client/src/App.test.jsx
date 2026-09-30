@@ -211,6 +211,7 @@ describe('App', () => {
       'Points',
       'Fees',
       'Net P&L',
+      'Actions',
     ]);
 
     expect(rowCells(2)).toEqual([
@@ -225,6 +226,7 @@ describe('App', () => {
       '-5.75',
       '$2.50',
       '-$25.50',
+      'Edit',
     ]);
     expect(rowCells(3)[1]).toBe('ES');
   });
@@ -246,6 +248,7 @@ describe('App', () => {
       '—',
       '$1.24',
       '—',
+      'Edit',
     ]);
   });
 
@@ -643,3 +646,361 @@ describe('Add trade', () => {
     expect(postedBodies(fetchMock)).toEqual([]);
   });
 });
+
+// A CLOSED trade whose timestamps have sub-minute precision. The form can show at most the
+// seconds, so the milliseconds only survive if untouched timestamps are sent back as-is.
+const PRECISE_TRADE = {
+  ...LOSING_TRADE,
+  enteredAt: '2026-09-30T14:30:42.375Z',
+  exitedAt: '2026-09-30T15:00:00.375Z',
+};
+
+// The bodies of every PUT request the mock received, as [path, body] pairs.
+function putRequests(fetchMock) {
+  return fetchMock.mock.calls
+    .filter(([, init]) => init?.method === 'PUT')
+    .map(([path, init]) => [path, JSON.parse(init.body)]);
+}
+
+function editButton(name) {
+  return screen.getByRole('button', { name });
+}
+
+async function openEdit(name) {
+  await screen.findByRole('table');
+  fireEvent.click(editButton(name));
+  return screen.getByRole('region', { name: 'Edit trade' });
+}
+
+function stubEditApi(overrides = {}) {
+  return stubApi({
+    '/api/trades': () => jsonResponse([OPEN_TRADE, PRECISE_TRADE, WINNING_TRADE]),
+    'PUT /api/trades/2': () => jsonResponse(PRECISE_TRADE),
+    'PUT /api/trades/3': () => jsonResponse(OPEN_TRADE),
+    ...overrides,
+  });
+}
+
+describe('Edit trade', () => {
+  it('has an Edit button for every trade', async () => {
+    stubEditApi();
+    render(<App />);
+    await screen.findByRole('table');
+
+    expect(screen.getAllByRole('button', { name: /^Edit / })).toHaveLength(3);
+    expect(editButton(/^Edit NQ LONG Sep 30, 2026, 4:00\sPM$/)).toBeTruthy();
+  });
+
+  it('opens a form filled with the trade, including its exit', async () => {
+    stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    expect(screen.getByLabelText('Instrument').value).toBe('2');
+    expect(screen.getByLabelText('Direction').value).toBe('SHORT');
+    expect(screen.getByLabelText('CLOSED').checked).toBe(true);
+    expect(screen.getByLabelText('Quantity').value).toBe('2');
+    expect(screen.getByLabelText('Entry price').value).toBe('18000.00');
+    // jsdom writes a value with seconds as "…:42.000"; browsers following the spec keep
+    // "…:42". The form treats both as the same time.
+    expect(screen.getByLabelText('Entered at').value).toMatch(/^2026-09-30T14:30:42(\.000)?$/);
+    expect(screen.getByLabelText('Exit price').value).toBe('18005.75');
+    expect(screen.getByLabelText('Exited at').value).toBe('2026-09-30T15:00');
+    expect(screen.getByLabelText('Fees (USD, whole trade)').value).toBe('2.50');
+    expect(screen.getByLabelText('Notes').value).toBe('chased the move');
+    expect(document.activeElement).toBe(screen.getByLabelText('Instrument'));
+  });
+
+  it('lets both time inputs hold seconds', async () => {
+    stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    expect(screen.getByLabelText('Entered at').getAttribute('step')).toBe('1');
+    expect(screen.getByLabelText('Exited at').getAttribute('step')).toBe('1');
+  });
+
+  it('disables every Edit button and hides Add trade while a form is open', async () => {
+    stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    for (const button of screen.getAllByRole('button', { name: /^Edit / })) {
+      expect(button.matches(':disabled')).toBe(true);
+    }
+    expect(screen.queryByRole('button', { name: 'Add trade' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('region', { name: 'Edit trade' })).toBeNull();
+    expect(editButton(/^Edit NQ LONG/).matches(':disabled')).toBe(false);
+  });
+
+  it('sends the full trade with untouched timestamps unchanged, then reloads', async () => {
+    let updated = false;
+    const fetchMock = stubEditApi({
+      'PUT /api/trades/2': () => {
+        updated = true;
+        return jsonResponse(PRECISE_TRADE);
+      },
+      '/api/stats': () => jsonResponse(updated ? STATS : EMPTY_STATS),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    change('Quantity', '3');
+    save();
+
+    expect(await screen.findByText('Trade updated.')).toBeTruthy();
+    expect(putRequests(fetchMock)).toEqual([
+      [
+        '/api/trades/2',
+        {
+          instrumentId: 2,
+          direction: 'SHORT',
+          status: 'CLOSED',
+          quantity: 3,
+          entryPrice: '18000.00',
+          enteredAt: '2026-09-30T14:30:42.375Z',
+          exitPrice: '18005.75',
+          exitedAt: '2026-09-30T15:00:00.375Z',
+          fees: '2.50',
+          notes: 'chased the move',
+        },
+      ],
+    ]);
+    expect(screen.queryByRole('region', { name: 'Edit trade' })).toBeNull();
+
+    // Everything shown now comes from the second load.
+    await waitForReload(fetchMock);
+    expect(statValue('Net P&L').textContent).toBe('$12,345,678,901,234,567.89');
+  });
+
+  it('closes an OPEN trade', async () => {
+    const fetchMock = stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit NQ LONG/);
+
+    fireEvent.click(screen.getByLabelText('CLOSED'));
+    expect(screen.getByLabelText('Exit price').value).toBe('');
+    expect(screen.getByLabelText('Exited at').value).toBe('');
+    change('Exit price', '18010.00');
+    change('Exited at', '2026-09-30T16:30:15');
+    save();
+
+    await screen.findByText('Trade updated.');
+    expect(putRequests(fetchMock)).toEqual([
+      [
+        '/api/trades/3',
+        {
+          instrumentId: 1,
+          direction: 'LONG',
+          status: 'CLOSED',
+          quantity: 1,
+          entryPrice: '18000.00',
+          enteredAt: '2026-09-30T16:00:00.000Z',
+          exitPrice: '18010.00',
+          exitedAt: '2026-09-30T16:30:15.000Z',
+          fees: '1.24',
+        },
+      ],
+    ]);
+  });
+
+  it('reopens a CLOSED trade without sending its exit', async () => {
+    const fetchMock = stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    expect(screen.queryByText(/Saving as OPEN clears/)).toBeNull();
+    fireEvent.click(screen.getByLabelText('OPEN'));
+    expect(
+      screen.getByText('Saving as OPEN clears the exit price, exit time and P&L.'),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText('Exit price')).toBeNull();
+    save();
+
+    await screen.findByText('Trade updated.');
+    const [[, body]] = putRequests(fetchMock);
+    expect(body.status).toBe('OPEN');
+    expect(body).not.toHaveProperty('exitPrice');
+    expect(body).not.toHaveProperty('exitedAt');
+    expect(body.enteredAt).toBe('2026-09-30T14:30:42.375Z');
+  });
+
+  it('shows server validation issues next to their fields and keeps the values', async () => {
+    const fetchMock = stubEditApi({
+      'PUT /api/trades/2': () =>
+        jsonResponse(
+          {
+            error: 'Validation failed',
+            issues: [
+              { path: ['exitedAt'], message: 'must be at or after enteredAt' },
+              { path: [], message: 'netPnl 1e13 is too large to store' },
+            ],
+          },
+          400,
+        ),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    change('Exited at', '2026-09-30T14:00');
+    save();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Could not save the trade.');
+    expect(alert.textContent).toContain('netPnl 1e13 is too large to store');
+
+    const exitedAt = screen.getByLabelText('Exited at');
+    expect(exitedAt.getAttribute('aria-invalid')).toBe('true');
+    expect(document.getElementById(exitedAt.getAttribute('aria-describedby')).textContent).toBe(
+      'Exited at must be at or after enteredAt',
+    );
+    expect(exitedAt.value).toBe('2026-09-30T14:00');
+    expect(screen.getByRole('region', { name: 'Edit trade' })).toBeTruthy();
+    expect(getCount(fetchMock)).toBe(3);
+  });
+
+  it('shows a field error and does not submit an edited local time that does not exist', async (context) => {
+    vi.stubEnv('TZ', 'America/New_York');
+    if (new Date(2026, 0, 1).getTimezoneOffset() !== 300) context.skip();
+
+    const fetchMock = stubEditApi();
+    render(<App />);
+    await openEdit(/^Edit NQ LONG/);
+
+    change('Entered at', '2026-03-08T02:30');
+    save();
+
+    const enteredAt = screen.getByLabelText('Entered at');
+    expect(document.getElementById(enteredAt.getAttribute('aria-describedby')).textContent).toBe(
+      'Entered at is not a valid time in your time zone',
+    );
+    expect(putRequests(fetchMock)).toEqual([]);
+  });
+
+  it('shows a general error for a failure that is not a validation error', async () => {
+    const fetchMock = stubEditApi({
+      'PUT /api/trades/2': () => jsonResponse({ error: 'Internal server error' }, 500),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    save();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not save the trade. Internal server error (HTTP 500)');
+    expect(screen.getByRole('region', { name: 'Edit trade' })).toBeTruthy();
+    expect(getCount(fetchMock)).toBe(3);
+  });
+
+  it('disables the form while the request is in flight', async () => {
+    let respond;
+    const fetchMock = stubEditApi({
+      'PUT /api/trades/2': () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    save();
+
+    const saving = screen.getByRole('button', { name: 'Saving…' });
+    expect(saving.matches(':disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Cancel' }).matches(':disabled')).toBe(true);
+    expect(screen.getByLabelText('Exit price').matches(':disabled')).toBe(true);
+
+    fireEvent.submit(saving.closest('form'));
+    expect(putRequests(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      respond(jsonResponse({ error: 'Internal server error' }, 500));
+    });
+    expect(screen.getByRole('button', { name: 'Save trade' }).matches(':disabled')).toBe(false);
+  });
+
+  it('closes the form and reloads when the trade no longer exists', async () => {
+    const fetchMock = stubEditApi({
+      'PUT /api/trades/2': () => jsonResponse({ error: 'Trade not found' }, 404),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    save();
+
+    expect(
+      await screen.findByText('That trade no longer exists. The journal has been reloaded.'),
+    ).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Edit trade' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    await waitForReload(fetchMock);
+  });
+
+  it('treats any other 404 as a failed save', async () => {
+    stubEditApi({
+      'PUT /api/trades/2': () => jsonResponse({ error: 'Not found' }, 404),
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    save();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not save the trade. Not found (HTTP 404)');
+    expect(screen.getByRole('region', { name: 'Edit trade' })).toBeTruthy();
+  });
+
+  it('keeps Edit disabled until the reloaded trades arrive', async () => {
+    let tradesCalls = 0;
+    let releaseTrades;
+    stubEditApi({
+      '/api/trades': () => {
+        tradesCalls += 1;
+        if (tradesCalls === 1) return jsonResponse([OPEN_TRADE, PRECISE_TRADE]);
+        return new Promise((resolve) => {
+          releaseTrades = () => resolve(jsonResponse([OPEN_TRADE, PRECISE_TRADE]));
+        });
+      },
+    });
+    render(<App />);
+    await openEdit(/^Edit MNQ SHORT/);
+
+    save();
+    await screen.findByText('Trade updated.');
+
+    // The table still shows the values from before the save.
+    expect(editButton(/^Edit MNQ SHORT/).matches(':disabled')).toBe(true);
+    expect(editButton(/^Edit NQ LONG/).matches(':disabled')).toBe(true);
+
+    await act(async () => {
+      releaseTrades();
+    });
+    expect(editButton(/^Edit MNQ SHORT/).matches(':disabled')).toBe(false);
+  });
+
+  it('keeps an instrument that is not in the instruments list', async () => {
+    const fetchMock = stubEditApi({
+      '/api/trades': () => jsonResponse([{ ...PRECISE_TRADE, instrumentId: 99 }]),
+    });
+    render(<App />);
+    await openEdit(/^Edit #99 SHORT/);
+
+    const instrument = screen.getByLabelText('Instrument');
+    expect(instrument.value).toBe('99');
+    expect(instrument.selectedOptions[0].textContent).toBe('#99');
+
+    save();
+    await screen.findByText('Trade updated.');
+    const [[, body]] = putRequests(fetchMock);
+    expect(body.instrumentId).toBe(99);
+  });
+});
+
+// Waits until the dashboard has been loaded a second time and the table is back.
+async function waitForReload(fetchMock) {
+  await act(async () => {});
+  expect(getCount(fetchMock)).toBe(6);
+  await screen.findByRole('table');
+}

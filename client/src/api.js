@@ -35,20 +35,25 @@ export async function fetchJson(path, signal) {
 
 // API errors are `{ "error": "..." }`, plus `issues` for a validation error. Anything else
 // (for example the Vite proxy's reply when the Express server is down) gets a generic message
-// with the status code.
+// with the status code. `serverError` is the server's own `error` string, if it sent one.
 async function readError(response) {
   try {
     const body = await response.json();
     if (typeof body?.error === 'string') {
       return {
         message: `${body.error} (HTTP ${response.status})`,
+        serverError: body.error,
         issues: Array.isArray(body.issues) ? body.issues : undefined,
       };
     }
   } catch {
     // Not JSON: fall through to the generic message.
   }
-  return { message: `Request failed (HTTP ${response.status})`, issues: undefined };
+  return {
+    message: `Request failed (HTTP ${response.status})`,
+    serverError: undefined,
+    issues: undefined,
+  };
 }
 
 /**
@@ -70,19 +75,41 @@ export async function loadDashboard(signal) {
  * POSTs a new trade. Resolves once the server has created it; the response body isn't
  * used, because the caller reloads the dashboard from the server anyway.
  *
- * Rejects with an Error with a readable message, like fetchJson. For a validation error the
- * Error also has `issues`: the server's `[{ path, message }]` list.
- *
- * There is no abort signal on purpose: cancelling a write the server may already have saved
- * would only hide the result.
+ * Rejects like sendTrade.
  *
  * @param {object} payload  see docs/DATA_MODEL.md#input-validation
  */
-export async function createTrade(payload) {
+export function createTrade(payload) {
+  return sendTrade('POST', '/api/trades', payload);
+}
+
+/**
+ * PUTs the full replacement of an existing trade. Resolves once the server has saved it;
+ * like createTrade, the response body isn't used.
+ *
+ * Rejects like sendTrade. A trade that no longer exists is a 404 with `serverError`
+ * "Trade not found".
+ *
+ * @param {number} id
+ * @param {object} payload  see docs/DATA_MODEL.md#editing-put-apitradesid
+ */
+export function updateTrade(id, payload) {
+  return sendTrade('PUT', `/api/trades/${id}`, payload);
+}
+
+// Sends a trade payload as JSON.
+//
+// Rejects with an Error with a readable message, like fetchJson. For an error response the
+// Error also has `status`, the server's `serverError` string when it sent one, and for a
+// validation error `issues`: the server's `[{ path, message }]` list.
+//
+// There is no abort signal on purpose: cancelling a write the server may already have saved
+// would only hide the result.
+async function sendTrade(method, path, payload) {
   let response;
   try {
-    response = await fetch('/api/trades', {
-      method: 'POST',
+    response = await fetch(path, {
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
@@ -91,8 +118,10 @@ export async function createTrade(payload) {
   }
 
   if (!response.ok) {
-    const { message, issues } = await readError(response);
+    const { message, serverError, issues } = await readError(response);
     const error = new Error(message);
+    error.status = response.status;
+    if (serverError !== undefined) error.serverError = serverError;
     if (issues) error.issues = issues;
     throw error;
   }

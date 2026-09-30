@@ -1,5 +1,6 @@
-// Pure helpers for the Add Trade form: turning what the user typed into the POST /api/trades
-// payload, and sorting the server's validation issues by field.
+// Pure helpers for the trade form: turning a trade into form values, turning what the user
+// typed into the POST or PUT /api/trades payload, and sorting the server's validation issues
+// by field.
 //
 // The server is the only validator of trade rules (see docs/DATA_MODEL.md#input-validation).
 // The one check made here is converting local times to UTC instants, because the server
@@ -19,8 +20,33 @@ export const TRADE_FIELDS = [
   'notes',
 ];
 
-// A `datetime-local` value: "2026-09-30T14:30", with optional seconds.
-const LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+// A `datetime-local` value: "2026-09-30T14:30", with optional seconds and fraction. Browsers
+// differ in how they write the same time (jsdom, for one, turns "14:30:42" into
+// "14:30:42.000"), so values are compared by their parts, never as strings.
+const LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/;
+
+// The [year, month, day, hour, minute, second, millisecond] of a `datetime-local` value, or
+// null if it isn't one. Missing seconds and milliseconds are 0.
+function parseLocalValue(localValue) {
+  const match = LOCAL_DATE_TIME.exec(localValue);
+  if (!match) return null;
+  const [year, month, day, hour, minute, second, fraction] = match.slice(1);
+  return [
+    ...[year, month, day, hour, minute].map(Number),
+    Number(second ?? 0),
+    // ".5" is 500 ms.
+    Number((fraction ?? '').padEnd(3, '0')),
+  ];
+}
+
+// Whether two `datetime-local` values name the same wall-clock time.
+function sameLocalValue(a, b) {
+  const partsA = parseLocalValue(a);
+  const partsB = parseLocalValue(b);
+  return (
+    partsA !== null && partsB !== null && partsA.every((part, index) => part === partsB[index])
+  );
+}
 
 /**
  * Converts a `datetime-local` value, a wall-clock time in the browser's time zone, to a UTC
@@ -39,12 +65,11 @@ const LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
  * @returns {string | null}
  */
 export function toApiTimestamp(localValue) {
-  const match = LOCAL_DATE_TIME.exec(localValue);
-  if (!match) return null;
+  const parts = parseLocalValue(localValue);
+  if (parts === null) return null;
 
-  // Seconds are optional: a missing group is undefined, which Number() would make NaN.
-  const [year, month, day, hour, minute, second] = match.slice(1).map((part) => Number(part ?? 0));
-  const date = new Date(year, month - 1, day, hour, minute, second);
+  const [year, month, day, hour, minute, second, millisecond] = parts;
+  const date = new Date(year, month - 1, day, hour, minute, second, millisecond);
 
   const unchanged =
     date.getFullYear() === year &&
@@ -56,13 +81,29 @@ export function toApiTimestamp(localValue) {
   return unchanged ? date.toISOString() : null;
 }
 
+const pad = (value) => String(value).padStart(2, '0');
+
 /** The `datetime-local` value for `now` in local time, to the minute: "2026-09-30T14:30". */
 export function defaultEnteredAt(now = new Date()) {
-  const pad = (value) => String(value).padStart(2, '0');
   return (
     `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
     `T${pad(now.getHours())}:${pad(now.getMinutes())}`
   );
+}
+
+/**
+ * The `datetime-local` value for an API timestamp, in the browser's time zone:
+ * "2026-09-30T14:30", or "2026-09-30T14:30:42" when the seconds aren't zero.
+ *
+ * Milliseconds are never shown. buildUpdatePayload recognizes an untouched timestamp by
+ * comparing the input's value with this one.
+ *
+ * @param {string} isoValue  e.g. "2026-09-30T14:30:42.375Z"
+ */
+export function toLocalInputValue(isoValue) {
+  const date = new Date(isoValue);
+  const seconds = date.getSeconds();
+  return defaultEnteredAt(date) + (seconds === 0 ? '' : `:${pad(seconds)}`);
 }
 
 /** The starting values of the form. Every value is a string, as the inputs hold them. */
@@ -78,6 +119,22 @@ export function initialTradeValues(now = new Date()) {
     exitedAt: '',
     fees: '0',
     notes: '',
+  };
+}
+
+/** The form values for editing an existing trade, as the API sent it. */
+export function tradeToFormValues(trade) {
+  return {
+    instrumentId: String(trade.instrumentId),
+    direction: trade.direction,
+    status: trade.status,
+    quantity: String(trade.quantity),
+    entryPrice: trade.entryPrice,
+    enteredAt: toLocalInputValue(trade.enteredAt),
+    exitPrice: trade.exitPrice ?? '',
+    exitedAt: trade.exitedAt === null ? '' : toLocalInputValue(trade.exitedAt),
+    fees: trade.fees,
+    notes: trade.notes ?? '',
   };
 }
 
@@ -98,8 +155,49 @@ const TIME_ERROR = 'is not a valid time in your time zone';
  * @returns {{ payload: object, errors: Record<string, string[]> }}
  */
 export function buildCreatePayload(values) {
+  return buildPayload(values, () => null);
+}
+
+/**
+ * Builds the PUT /api/trades/:id body from the form values. PUT replaces every client-owned
+ * field, so this is the same body as for a new trade: blank fields are left out (the server
+ * reports a missing `fees` instead of defaulting it, and a missing `notes` means null).
+ *
+ * A timestamp the user didn't change is sent back exactly as the API sent it. The input only
+ * shows it to the second (or minute), so converting the shown value back would drop its
+ * milliseconds, and a local time repeated when clocks fall back could turn into the other
+ * instant, an hour away. An edited timestamp is converted by toApiTimestamp as usual, which
+ * still rejects a local time that doesn't exist.
+ *
+ * @param {ReturnType<typeof tradeToFormValues>} values
+ * @param {object} trade  the trade being edited, as the API sent it
+ * @returns {{ payload: object, errors: Record<string, string[]> }}
+ */
+export function buildUpdatePayload(values, trade) {
+  return buildPayload(values, (field, value) => {
+    const original = trade[field];
+    return original !== null && sameLocalValue(value, toLocalInputValue(original))
+      ? original
+      : null;
+  });
+}
+
+// `unchangedTimestamp(field, value)` returns the timestamp to send as-is, or null to
+// convert `value` from local time.
+function buildPayload(values, unchangedTimestamp) {
   const payload = {};
   const errors = {};
+
+  function addTimestamp(field) {
+    const value = values[field];
+    if (value === '') return;
+    const timestamp = unchangedTimestamp(field, value) ?? toApiTimestamp(value);
+    if (timestamp === null) {
+      errors[field] = [TIME_ERROR];
+    } else {
+      payload[field] = timestamp;
+    }
+  }
 
   if (values.instrumentId !== '') payload.instrumentId = Number(values.instrumentId);
   if (values.direction !== '') payload.direction = values.direction;
@@ -111,11 +209,11 @@ export function buildCreatePayload(values) {
   if (quantity !== '') payload.quantity = /^\d+$/.test(quantity) ? Number(quantity) : quantity;
 
   addTrimmed(payload, 'entryPrice', values.entryPrice);
-  addTimestamp(payload, errors, 'enteredAt', values.enteredAt);
+  addTimestamp('enteredAt');
 
   if (values.status === 'CLOSED') {
     addTrimmed(payload, 'exitPrice', values.exitPrice);
-    addTimestamp(payload, errors, 'exitedAt', values.exitedAt);
+    addTimestamp('exitedAt');
   }
 
   addTrimmed(payload, 'fees', values.fees);
@@ -129,16 +227,6 @@ export function buildCreatePayload(values) {
 function addTrimmed(payload, field, value) {
   const trimmed = value.trim();
   if (trimmed !== '') payload[field] = trimmed;
-}
-
-function addTimestamp(payload, errors, field, value) {
-  if (value === '') return;
-  const timestamp = toApiTimestamp(value);
-  if (timestamp === null) {
-    errors[field] = [TIME_ERROR];
-  } else {
-    payload[field] = timestamp;
-  }
 }
 
 /**
